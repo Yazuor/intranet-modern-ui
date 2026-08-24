@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trans Assistant - Intranet Modern UI
 // @namespace    trans-assistant
-// @version      1.02
+// @version      1.03
 // @description  Nowoczesna, odwracalna nakladka interfejsu na intranet CEMET.
 // @match        *://intranet/*
 // @updateURL    https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
@@ -47,7 +47,7 @@
     }
     window.transAssistantIntranetModernUiRunning = true;
 
-    const SCRIPT_VERSION = "1.02";
+    const SCRIPT_VERSION = "1.03";
     const performanceMetrics = {
         scriptStartedAt: performance.now(),
         earlyUiStartedAt: 0,
@@ -108,6 +108,7 @@
     const CARRIER_ORDER_FORM_PATH_PATTERN = /\/zlecenie\/zlec_akcept2a\.php$/i;
     const CARRIER_FREIGHT_REPORT_PATH_PATTERN = /\/raporty\/raport_1\.php$/i;
     const ORDER_REGISTER_REPORT_PATH_PATTERN = /\/raporty\/raport_2\.php$/i;
+    const DRIVER_BROWSE_PATH_PATTERN = /\/administracja\/kierowca_przegladaj\.php$/i;
     const ORDER_COLUMNS = [
         "position",
         "order-number",
@@ -4437,8 +4438,12 @@
     function buildCarrierDriverRecordValues(driver, contractorId) {
         const firstName = String(driver?.firstName || "").replace(/\s+/g, " ").trim();
         const lastName = String(driver?.lastName || "").replace(/\s+/g, " ").trim();
+        const phone = String(driver?.phone || "").trim();
         if (!firstName || !lastName) {
             throw new Error("Podaj osobno imię i nazwisko kierowcy.");
+        }
+        if (!/^\d{3}-\d{3}-\d{3}$/.test(phone)) {
+            throw new Error("Telefon musi mieć format 123-456-789.");
         }
         return {
             dod: "1",
@@ -4446,7 +4451,7 @@
             krajk: "ZG",
             imie: firstName,
             nazwisko: lastName,
-            numer_gsm: String(driver?.phone || "").trim(),
+            numer_gsm: phone,
             numer_dok: String(driver?.documentNumber || "").trim(),
             stan: "A"
         };
@@ -4619,20 +4624,28 @@
         const selector = kind === "driver" ? '[name="kierowca"]' : '[name="i_sam"]';
         const currentSelect = table?.querySelector(selector);
         if (!currentSelect) throw new Error("Nie znaleziono listy do odświeżenia.");
-        const freshPage = await fetchHtmlDocument(location.href, { cache: "no-store" });
-        const freshSelect = freshPage.document.querySelector(selector);
-        if (!freshSelect || freshSelect.options.length <= currentSelect.options.length) {
-            throw new Error("Intranet nie zwrócił jeszcze odświeżonej listy.");
+        const previousCount = currentSelect.options.length;
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+            if (attempt > 0) {
+                await new Promise(resolve => window.setTimeout(resolve, attempt * 300));
+            }
+            const freshPage = await fetchHtmlDocument(location.href, { cache: "no-store" });
+            const freshSelect = freshPage.document.querySelector(selector);
+            if (!freshSelect || freshSelect.options.length <= previousCount) continue;
+
+            resetEnhancedNativeSelect(currentSelect, kind === "driver" ? "driver" : "vehicle");
+            currentSelect.replaceChildren(...Array.from(freshSelect.options).map(option => option.cloneNode(true)));
+            const selection = kind === "driver"
+                ? selectCarrierDriverByName(currentSelect, record.driverName)
+                : selectCarrierVehicleByPlates(currentSelect, record.tractor, record.trailer);
+            enhanceNativeSelectSearch(currentSelect.closest("tr"), kind === "driver" ? "driver" : "vehicle");
+            if (selection?.ok) return selection;
         }
-
-        resetEnhancedNativeSelect(currentSelect, kind === "driver" ? "driver" : "vehicle");
-        currentSelect.replaceChildren(...Array.from(freshSelect.options).map(option => option.cloneNode(true)));
-
-        const selection = kind === "driver"
-            ? selectCarrierDriverByName(currentSelect, record.driverName)
-            : selectCarrierVehicleByPlates(currentSelect, record.tractor, record.trailer);
-        enhanceNativeSelectSearch(currentSelect.closest("tr"), kind === "driver" ? "driver" : "vehicle");
-        return selection;
+        throw new Error(
+            kind === "driver"
+                ? "Intranet nie potwierdził dodania kierowcy na liście. Sprawdź dane i spróbuj ponownie."
+                : "Intranet nie potwierdził dodania taboru na liście. Sprawdź dane i spróbuj ponownie."
+        );
     }
 
     function openCarrierRecordModal(table, kind, nativeLink) {
@@ -4659,7 +4672,9 @@
                             <label><span>Nazwisko</span><input name="record-last-name" autocomplete="family-name" required></label>
                         </div>
                         <div class="ta-carrier-record-columns">
-                            <label><span>Telefon</span><input name="record-phone" inputmode="tel" autocomplete="tel"></label>
+                            <label><span>Telefon</span><input name="record-phone" inputmode="tel" autocomplete="tel"
+                                required pattern="[0-9]{3}-[0-9]{3}-[0-9]{3}" placeholder="123-456-789"
+                                title="Wpisz telefon w formacie 123-456-789"></label>
                             <label><span>Numer dokumentu</span><input name="record-document" autocomplete="off"></label>
                         </div>
                     ` : `
@@ -4738,21 +4753,15 @@
 
                 status.dataset.tone = "progress";
                 status.textContent = "Zapisano. Odświeżam listę…";
-                try {
-                    const selection = await refreshCarrierRecordSelect(table, kind, record);
-                    if (!selection?.ok) {
-                        throw new Error(selection?.reason || "Nie znaleziono dodanej pozycji na odświeżonej liście.");
-                    }
-                    status.dataset.tone = "success";
-                    status.textContent = isDriver
-                        ? "Kierowca został dodany i wybrany."
-                        : "Tabor został dodany i wybrany.";
-                    setTimeout(close, 800);
-                } catch {
-                    status.dataset.tone = "success";
-                    status.textContent = "Zapisano. Odświeżam formularz, aby pobrać nową pozycję…";
-                    setTimeout(() => location.reload(), 500);
+                const selection = await refreshCarrierRecordSelect(table, kind, record);
+                if (!selection?.ok) {
+                    throw new Error(selection?.reason || "Nie znaleziono dodanej pozycji na odświeżonej liście.");
                 }
+                status.dataset.tone = "success";
+                status.textContent = isDriver
+                    ? "Kierowca został dodany i wybrany."
+                    : "Tabor został dodany i wybrany.";
+                setTimeout(close, 800);
             } catch (error) {
                 console.error(`[Trans Assistant Intranet Modern UI ${SCRIPT_VERSION}] Zapis rekordu przewoźnika nie powiódł się.`, error);
                 status.dataset.tone = "error";
@@ -5796,6 +5805,43 @@
         return true;
     }
 
+    function sanitizeLegacyDriverSearchWarnings(container) {
+        if (!(container instanceof Element)) return false;
+        const before = container.innerHTML;
+        const after = before.replace(
+            /Warning:\s*htmlspecialchars\(\):\s*charset\s*(?:['"]|&(?:apos|quot|#0*39|#0*34);)?ISO-8859-2(?:['"]|&(?:apos|quot|#0*39|#0*34);)?\s*not\s+supported,\s*assuming\s+iso-8859-1\s+in\s+[^<]*?administracja\/lib3\/search\.php\s+on\s+line\s+\d+(?:\s*<br\s*\/?\s*>)?/gi,
+            ""
+        );
+        if (after === before) return false;
+        container.innerHTML = after.trim();
+        return true;
+    }
+
+    function installLegacyDriverSearchWarningFilter() {
+        const root = document.documentElement;
+        if (!document.body || root.dataset.taDriverSearchWarningFilter === "true") return;
+        root.dataset.taDriverSearchWarningFilter = "true";
+        const sanitizeAll = scope => {
+            if (scope instanceof Element && /^results\d*$/i.test(scope.id || "")) {
+                sanitizeLegacyDriverSearchWarnings(scope);
+            }
+            scope?.querySelectorAll?.('[id^="results"]')
+                .forEach(sanitizeLegacyDriverSearchWarnings);
+        };
+        sanitizeAll(document.body);
+        const observer = new MutationObserver(mutations => {
+            mutations.forEach(mutation => sanitizeAll(mutation.target));
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    function mountDriverBrowsePage() {
+        if (!mountGenericIntranetPage()) return false;
+        installLegacyDriverSearchWarningFilter();
+        document.documentElement.classList.add("ta-intranet-page-driver-browse");
+        return true;
+    }
+
     function findOptionByText(select, expectedText) {
         const expected = foldText(expectedText);
         return Array.from(select?.options || []).find(option => foldText(option.textContent) === expected)
@@ -6812,6 +6858,11 @@
             matches: pathname => ORDER_REGISTER_REPORT_PATH_PATTERN.test(pathname),
             mount: mountOrderRegisterReportPage,
             setMode: setOrderRegisterReportMode
+        },
+        {
+            id: "driver-browse",
+            matches: pathname => DRIVER_BROWSE_PATH_PATTERN.test(pathname),
+            mount: mountDriverBrowsePage
         },
         {
             id: "generic",
