@@ -2,7 +2,7 @@
 // @name         Trans Assistant - Intranet Modern UI
 // @namespace    trans-assistant
 // @version      1.01
-// @description  Nowoczesna, odwracalna nakladka interfejsu na intranet CEMET.
+// @description  
 // @match        *://intranet/*
 // @updateURL    https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
 // @downloadURL  https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
