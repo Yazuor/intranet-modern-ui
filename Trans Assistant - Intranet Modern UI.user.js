@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Trans Assistant - Intranet Modern UI
 // @namespace    trans-assistant
-// @version      1.01
-// @description  
+// @version      1.02
+// @description  Nowoczesna, odwracalna nakladka interfejsu na intranet CEMET.
 // @match        *://intranet/*
 // @updateURL    https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
 // @downloadURL  https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
@@ -47,7 +47,7 @@
     }
     window.transAssistantIntranetModernUiRunning = true;
 
-    const SCRIPT_VERSION = "1.01";
+    const SCRIPT_VERSION = "1.02";
     const performanceMetrics = {
         scriptStartedAt: performance.now(),
         earlyUiStartedAt: 0,
@@ -371,11 +371,11 @@
                     pointer-events:none;
                 }
                 html.ta-intranet-modern.ta-intranet-accepted-boot:not(.${READY_CLASS})::before {
-                    content:"Ładowanie przyjętych zleceń…";
+                    content:"Pobieranie zleceń…";
                     position:fixed;
                     z-index:2147483645;
                     left:50%;
-                    top:42%;
+                    top:50%;
                     transform:translate(-50%,-50%);
                     box-sizing:border-box;
                     min-width:300px;
@@ -394,7 +394,7 @@
                     position:fixed;
                     z-index:2147483646;
                     left:50%;
-                    top:calc(42% - 25px);
+                    top:calc(50% - 25px);
                     width:58px;
                     height:58px;
                     margin:-29px 0 0 -29px;
@@ -425,9 +425,9 @@
                 }
                 #${NAVIGATION_SHIELD_ID} > span {
                     display:block;
-                    min-width:260px;
+                    min-width:300px;
                     box-sizing:border-box;
-                    padding:74px 28px 22px;
+                    padding:88px 30px 24px;
                     border:1px solid #d7e2d1;
                     border-top:4px solid #72b333;
                     border-radius:14px;
@@ -440,16 +440,17 @@
                     content:"";
                     position:absolute;
                     left:50%;
-                    top:calc(50% - 24px);
-                    width:44px;
-                    height:44px;
-                    margin:-22px 0 0 -22px;
+                    top:calc(50% - 25px);
+                    width:58px;
+                    height:58px;
+                    margin:-29px 0 0 -29px;
                     box-sizing:border-box;
-                    border:4px solid #dce9d2;
+                    border:5px solid #dce9d2;
                     border-top-color:#72b333;
                     border-right-color:#17477e;
                     border-radius:50%;
-                    animation:taAcceptedBootSpin .85s linear infinite;
+                    box-shadow:0 0 0 8px rgba(114,179,51,.08);
+                    animation:taAcceptedBootSpin .85s cubic-bezier(.55,.12,.45,.88) infinite;
                 }
                 @keyframes taAcceptedBootSpin { to { transform:rotate(360deg); } }
                 @media (prefers-reduced-motion:reduce) {
@@ -3070,7 +3071,14 @@
                 .find(control => /wprowadz.*zalacznik/.test(foldText(control.value || control.textContent)))
                 || uploadForm.querySelector('input[type="submit"], button[type="submit"]')
             : null;
-        if (uploadSubmit) uploadSubmit.dataset.taOrderAttachmentSubmit = "true";
+        if (uploadSubmit) {
+            uploadSubmit.dataset.taOrderAttachmentSubmit = "true";
+            if (/^(?:button|reset)$/i.test(String(uploadSubmit.type || ""))) {
+                uploadSubmit.removeAttribute("onclick");
+                uploadSubmit.onclick = null;
+                uploadSubmit.type = "submit";
+            }
+        }
 
         const deleteControls = Array.from(document.querySelectorAll('input[type="submit"], input[type="button"], button'))
             .filter(control => /usun/.test(foldText(control.value || control.textContent)));
@@ -3156,7 +3164,7 @@
                     const confirmed = isUpload ? newCount > oldCount : newCount < oldCount;
                     if (!confirmed) throw new Error("Serwer nie potwierdził zmiany listy załączników.");
                     notifyAcceptedPage(newCount, true);
-                    window.setTimeout(() => location.reload(), 80);
+                    window.setTimeout(() => window.close(), 120);
                 }).catch(error => {
                     console.warn(`[Trans Assistant Intranet Modern UI ${SCRIPT_VERSION}] Zapis załącznika bez przeładowania strony nadrzędnej nie powiódł się:`, error);
                     showOrderSaveMessage(error?.message || "Nie udało się potwierdzić zapisu załącznika.", "error");
@@ -6829,14 +6837,30 @@
         renderViewSwitch();
     }
 
-    function showNavigationShield() {
+    function navigationShieldLabel(destinationUrl = location.href) {
+        try {
+            const destination = new URL(destinationUrl, location.href);
+            if (ACCEPTED_ORDERS_PATH_PATTERN.test(normalizePathname(destination.pathname))) {
+                return "Pobieranie zleceń…";
+            }
+        } catch (_) {}
+        return "Ładowanie widoku…";
+    }
+
+    function showNavigationShield(destinationUrl = location.href) {
         if (currentMode !== MODE_MODERN || !document.body) return;
-        if (document.getElementById(NAVIGATION_SHIELD_ID)) return;
+        const label = navigationShieldLabel(destinationUrl);
+        const existingShield = document.getElementById(NAVIGATION_SHIELD_ID);
+        if (existingShield) {
+            const existingLabel = existingShield.querySelector("span");
+            if (existingLabel) existingLabel.textContent = label;
+            return;
+        }
         const shield = document.createElement("div");
         shield.id = NAVIGATION_SHIELD_ID;
         shield.setAttribute("role", "status");
         shield.setAttribute("aria-live", "polite");
-        shield.innerHTML = "<span>Ładowanie widoku…</span>";
+        shield.innerHTML = `<span>${label}</span>`;
         document.body.appendChild(shield);
     }
 
@@ -6869,7 +6893,7 @@
         document.addEventListener("click", event => {
             if (event.defaultPrevented || currentMode !== MODE_MODERN) return;
             const link = event.target?.closest?.("a[href]");
-            if (isSameWindowNavigationLink(link, event)) showNavigationShield();
+            if (isSameWindowNavigationLink(link, event)) showNavigationShield(link.href);
         });
         document.addEventListener("submit", event => {
             if (event.defaultPrevented || currentMode !== MODE_MODERN) return;
@@ -6877,7 +6901,7 @@
             const target = String(form?.getAttribute("target") || "").trim().toLowerCase();
             if (!form || form.method.toLowerCase() === "dialog") return;
             if (target && target !== "_self" && target !== window.name.toLowerCase()) return;
-            showNavigationShield();
+            showNavigationShield(form.action || location.href);
         });
         window.addEventListener("beforeunload", showNavigationShield);
         window.addEventListener("pagehide", showNavigationShield);
@@ -6896,7 +6920,18 @@
             reveal();
             return;
         }
-        requestAnimationFrame(() => requestAnimationFrame(reveal));
+        let stabilizationStarted = false;
+        const stabilize = () => {
+            if (stabilizationStarted) return;
+            stabilizationStarted = true;
+            requestAnimationFrame(() => requestAnimationFrame(reveal));
+        };
+        if (document.readyState === "complete") {
+            stabilize();
+            return;
+        }
+        window.addEventListener("load", stabilize, { once: true });
+        window.setTimeout(stabilize, 1200);
     }
 
     function requestViewMode(mode) {
