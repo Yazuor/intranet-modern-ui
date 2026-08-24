@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Trans Assistant - Intranet Modern UI
 // @namespace    trans-assistant
-// @version      1.03
+// @version      1.04
 // @description  Nowoczesna, odwracalna nakladka interfejsu na intranet CEMET.
 // @match        *://intranet/*
 // @updateURL    https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
 // @downloadURL  https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
+// @require      https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.boot.js
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -47,7 +48,7 @@
     }
     window.transAssistantIntranetModernUiRunning = true;
 
-    const SCRIPT_VERSION = "1.03";
+    const SCRIPT_VERSION = "1.04";
     const performanceMetrics = {
         scriptStartedAt: performance.now(),
         earlyUiStartedAt: 0,
@@ -4435,16 +4436,21 @@
         return "";
     }
 
+    function formatCarrierDriverPhone(value) {
+        const digits = String(value || "").replace(/\D/g, "");
+        if (digits.length !== 9) {
+            throw new Error("Wpisz telefon w formacie 123-456-789");
+        }
+        return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+    }
+
     function buildCarrierDriverRecordValues(driver, contractorId) {
         const firstName = String(driver?.firstName || "").replace(/\s+/g, " ").trim();
         const lastName = String(driver?.lastName || "").replace(/\s+/g, " ").trim();
-        const phone = String(driver?.phone || "").trim();
         if (!firstName || !lastName) {
             throw new Error("Podaj osobno imię i nazwisko kierowcy.");
         }
-        if (!/^\d{3}-\d{3}-\d{3}$/.test(phone)) {
-            throw new Error("Telefon musi mieć format 123-456-789.");
-        }
+        const phone = formatCarrierDriverPhone(driver?.phone);
         return {
             dod: "1",
             kontrahent: String(contractorId || ""),
@@ -4672,9 +4678,8 @@
                             <label><span>Nazwisko</span><input name="record-last-name" autocomplete="family-name" required></label>
                         </div>
                         <div class="ta-carrier-record-columns">
-                            <label><span>Telefon</span><input name="record-phone" inputmode="tel" autocomplete="tel"
-                                required pattern="[0-9]{3}-[0-9]{3}-[0-9]{3}" placeholder="123-456-789"
-                                title="Wpisz telefon w formacie 123-456-789"></label>
+                            <label><span>Telefon</span><input name="record-phone" inputmode="numeric" autocomplete="tel"
+                                placeholder="123-456-789" aria-label="Telefon w formacie 123-456-789"></label>
                             <label><span>Numer dokumentu</span><input name="record-document" autocomplete="off"></label>
                         </div>
                     ` : `
@@ -4697,6 +4702,17 @@
         requestAnimationFrame(() => backdrop.classList.add("is-visible"));
 
         const form = backdrop.querySelector("form");
+        const phoneInput = isDriver ? form.elements["record-phone"] : null;
+        const normalizePhoneInput = () => {
+            if (!phoneInput) return;
+            phoneInput.setCustomValidity("");
+            const digits = String(phoneInput.value || "").replace(/\D/g, "");
+            if (digits.length === 9) {
+                phoneInput.value = `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+            }
+        };
+        phoneInput?.addEventListener("input", normalizePhoneInput);
+        phoneInput?.addEventListener("blur", normalizePhoneInput);
         let escapeHandler = null;
         const close = () => {
             if (escapeHandler) document.removeEventListener("keydown", escapeHandler);
@@ -4718,6 +4734,16 @@
             event.preventDefault();
             const status = form.querySelector(".ta-carrier-record-status");
             const submit = form.querySelector(".ta-carrier-record-submit");
+            if (phoneInput) {
+                try {
+                    phoneInput.value = formatCarrierDriverPhone(phoneInput.value);
+                    phoneInput.setCustomValidity("");
+                } catch (error) {
+                    phoneInput.setCustomValidity(error.message);
+                    phoneInput.reportValidity();
+                    return;
+                }
+            }
             const contractorId = getCarrierContractorId();
             const links = getCarrierNativeOrderLinks();
             if (!contractorId) {
@@ -6964,6 +6990,7 @@
     function revealModernUi() {
         const reveal = () => {
             document.documentElement.classList.add(READY_CLASS);
+            window.__transAssistantReleaseIntranetBootShield?.();
             if (currentMode === MODE_MODERN) finishLoginTransitionOnAcceptedPage();
             publishPerformanceMetrics();
         };
@@ -12352,4 +12379,3 @@
         initializePage();
     }
 })();
-
