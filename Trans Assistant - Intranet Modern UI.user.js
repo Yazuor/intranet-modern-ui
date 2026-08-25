@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         Trans Assistant - Intranet Modern UI
 // @namespace    trans-assistant
-// @version      1.04
+// @version      1.08
 // @description  Nowoczesna, odwracalna nakladka interfejsu na intranet CEMET.
 // @match        *://intranet/*
 // @updateURL    https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
 // @downloadURL  https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
-// @require      https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.boot.js
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -48,7 +47,7 @@
     }
     window.transAssistantIntranetModernUiRunning = true;
 
-    const SCRIPT_VERSION = "1.04";
+    const SCRIPT_VERSION = "1.08";
     const performanceMetrics = {
         scriptStartedAt: performance.now(),
         earlyUiStartedAt: 0,
@@ -67,6 +66,7 @@
     const STYLE_ID = "trans-assistant-intranet-modern-ui-styles";
     const SWITCH_ID = "trans-assistant-intranet-view-switch";
     const DASHBOARD_ID = "trans-assistant-intranet-results-dashboard";
+    const ORDER_SAVE_OVERLAY_ID = "trans-assistant-order-save-overlay";
     const READY_CLASS = "ta-intranet-ui-ready";
     const NAVIGATION_SHIELD_ID = "trans-assistant-intranet-navigation-shield";
     const REMOTE_CONFIG_URL = "https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/config.json";
@@ -572,7 +572,7 @@
                 && /\/zlecenie\/zatwierdzanie\.php$/i.test(pathname)
                 && /^zatwierdzone[.!]?$/i.test(text);
             const isOrderDetailsSaveSuccess = modern
-                && ORDER_DETAILS_PATH_PATTERN.test(pathname)
+                && (ORDER_DETAILS_PATH_PATTERN.test(pathname) || ACCEPTED_ORDERS_PATH_PATTERN.test(pathname))
                 && /^dane\s+poprawione[.!]?$/i.test(text);
             if (!isApprovalSuccess && !isOrderDetailsSaveSuccess) return nativeAlert(message);
             let selectedCount = 0;
@@ -582,11 +582,6 @@
                 : { kind: "order-details-save-success", message: text };
             root.dataset[PENDING_DIALOG_DATASET_KEY] = JSON.stringify(detail);
             document.dispatchEvent(new CustomEvent(NATIVE_DIALOG_EVENT, { detail }));
-            window.setTimeout(() => {
-                if (!root.dataset[PENDING_DIALOG_DATASET_KEY]) return;
-                delete root.dataset[PENDING_DIALOG_DATASET_KEY];
-                nativeAlert(message);
-            }, 6000);
             return undefined;
         };
         try {
@@ -618,7 +613,7 @@
                     && /\\/zlecenie\\/zatwierdzanie\\.php$/i.test(pathname)
                     && /^zatwierdzone[.!]?$/i.test(text);
                 const isOrderDetailsSaveSuccess = modern
-                    && /\\/zlecenie\\/zlec_akcept_zm\\.php$/i.test(pathname)
+                    && /\\/zlecenie\\/(?:zlec_akcept_zm|przyjete)\\.php$/i.test(pathname)
                     && /^dane\\s+poprawione[.!]?$/i.test(text);
                 if (!isApprovalSuccess && !isOrderDetailsSaveSuccess) return nativeAlert(message);
                 let selectedCount = 0;
@@ -628,11 +623,6 @@
                     : { kind: "order-details-save-success", message: text };
                 document.documentElement.dataset[datasetKey] = JSON.stringify(detail);
                 document.dispatchEvent(new CustomEvent(eventName, { detail }));
-                window.setTimeout(() => {
-                    if (!document.documentElement.dataset[datasetKey]) return;
-                    delete document.documentElement.dataset[datasetKey];
-                    nativeAlert(message);
-                }, 6000);
                 return undefined;
             };
         })();`;
@@ -651,7 +641,8 @@
             const pathname = normalizePathname();
             const isApprovalPage = /\/zlecenie\/zatwierdzanie\.php$/i.test(pathname);
             const isOrderDetailsPage = ORDER_DETAILS_PATH_PATTERN.test(pathname);
-            if (!isApprovalPage && !isOrderDetailsPage) return;
+            const isAcceptedOrdersPage = ACCEPTED_ORDERS_PATH_PATTERN.test(pathname);
+            if (!isApprovalPage && !isOrderDetailsPage && !isAcceptedOrdersPage) return;
             const script = event.target;
             if (!script || String(script.tagName || "").toUpperCase() !== "SCRIPT" || script.src) return;
             const source = String(script.textContent || "");
@@ -2287,7 +2278,6 @@
         }
         if (detail?.kind === "order-details-save-success") {
             delete root.dataset[PENDING_DIALOG_DATASET_KEY];
-            showOrderSaveMessage("Dane zostały zapisane.", "success");
             return true;
         }
         if (detail?.kind !== "approval-success") return false;
@@ -2527,6 +2517,15 @@
             if (fieldName) row.dataset.taOrderSearchField = fieldName;
             if (["k_id", "przewoznik", "data_od", "id_p"].includes(fieldName)) {
                 row.dataset.taOrderSearchWide = "true";
+            }
+            const suggestions = cells[1].querySelector("#results, #results3, [id^='results']");
+            if (suggestions && ["k_id", "przewoznik", "id_p"].includes(fieldName)) {
+                row.dataset.taOrderSearchLookup = "true";
+                suggestions.dataset.taOrderSearchSuggestions = "true";
+                const lookupAction = Array.from(cells[1].querySelectorAll('input[type="submit"], button')).find(candidate => (
+                    /wybierz/i.test(String(candidate.value || candidate.textContent || "").trim())
+                ));
+                if (lookupAction) lookupAction.dataset.taOrderSearchLookupAction = "true";
             }
         });
 
@@ -3487,6 +3486,65 @@
         notice._taHideTimer = window.setTimeout(() => { notice.hidden = true; }, 6000);
     }
 
+    function ensureOrderDetailsSaveOverlay() {
+        let overlay = document.getElementById(ORDER_SAVE_OVERLAY_ID);
+        if (overlay) return overlay;
+        overlay = document.createElement("div");
+        overlay.id = ORDER_SAVE_OVERLAY_ID;
+        overlay.hidden = true;
+        overlay.setAttribute("role", "status");
+        overlay.setAttribute("aria-live", "polite");
+        overlay.innerHTML = `
+            <div class="ta-order-save-overlay-card">
+                <i class="ta-order-save-spinner" aria-hidden="true"></i>
+                <strong>Zapisywanie zlecenia — nie zamykaj okna</strong>
+            </div>
+        `;
+        document.body?.appendChild(overlay);
+        return overlay;
+    }
+
+    function setOrderDetailsSavePending(pending) {
+        const state = orderDetailsPageState;
+        if (!state) return;
+        state.savePending = Boolean(pending);
+        state.closeLinks?.forEach(link => {
+            if (pending) {
+                if (link.dataset.taOriginalCloseTitle === undefined) {
+                    link.dataset.taOriginalCloseTitle = link.getAttribute("title") || "";
+                }
+                link.setAttribute("aria-disabled", "true");
+                link.title = "Zapisywanie zlecenia — nie zamykaj okna";
+            } else {
+                link.removeAttribute("aria-disabled");
+                const originalTitle = link.dataset.taOriginalCloseTitle;
+                if (originalTitle) link.title = originalTitle;
+                else link.removeAttribute("title");
+                delete link.dataset.taOriginalCloseTitle;
+            }
+        });
+    }
+
+    function beginOrderDetailsSave() {
+        const state = orderDetailsPageState;
+        if (!state) return "";
+        const token = `save-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        state.saveOperationTokens.add(token);
+        setOrderDetailsSavePending(true);
+        ensureOrderDetailsSaveOverlay().hidden = false;
+        return token;
+    }
+
+    function endOrderDetailsSave(token) {
+        const state = orderDetailsPageState;
+        if (!state || !token) return;
+        state.saveOperationTokens.delete(token);
+        if (state.saveOperationTokens.size) return;
+        const overlay = document.getElementById(ORDER_SAVE_OVERLAY_ID);
+        if (overlay) overlay.hidden = true;
+        setOrderDetailsSavePending(false);
+    }
+
     function logOrderSave(kind, form, submitter) {
         console.log("[CEMET SAVE]", {
             kind,
@@ -3574,6 +3632,8 @@
             const frameName = `ta-correction-${token}`;
             frame.name = frameName;
             frame.hidden = true;
+            frame.setAttribute("sandbox", "allow-forms allow-same-origin");
+            frame.setAttribute("aria-hidden", "true");
             form.hidden = true;
             form.method = String(record.form.method || "POST").toUpperCase();
             form.action = new URL(record.form.getAttribute("action") || record.url, record.url).href;
@@ -3750,6 +3810,8 @@
 
             frame.name = frameName;
             frame.hidden = true;
+            frame.setAttribute("sandbox", "allow-forms allow-same-origin");
+            frame.setAttribute("aria-hidden", "true");
             form.hidden = true;
             form.method = String(record.form.method || "POST").toUpperCase();
             form.action = new URL(record.form.getAttribute("action") || record.url, record.url).href;
@@ -3852,7 +3914,6 @@
             button.title = message;
             panel.dataset.taState = state;
             if (state === "error") showOrderSaveMessage(message, "error");
-            if (state === "success") showOrderSaveMessage(message, "success");
         };
 
         let correctionRecordPromise = null;
@@ -3913,6 +3974,7 @@
             paymentInput.disabled = true;
             deliveryInput.disabled = true;
             setStatus("Zapisywanie i sprawdzanie danych…", "saving");
+            const saveToken = beginOrderDetailsSave();
             try {
                 const correctionRecord = await panel._taLoadCorrectionRecord();
                 console.log("[CEMET SAVE]", {
@@ -3942,6 +4004,7 @@
                 setStatus(error?.message || "Nie udało się zapisać zmian.", "error");
                 return false;
             } finally {
+                endOrderDetailsSave(saveToken);
                 button.disabled = false;
                 paymentInput.disabled = false;
                 deliveryInput.disabled = false;
@@ -4106,12 +4169,14 @@
             },
             async save(correctionRecord = null) {
                 if (savePromise) return savePromise;
+                let saveToken = "";
                 savePromise = (async () => {
                     const loadingIso = String(loading.input.value || "");
                     const deliveryIso = String(delivery.input.value || "");
                     if (!/^\d{4}-\d{2}-\d{2}$/.test(loadingIso) || !/^\d{4}-\d{2}-\d{2}$/.test(deliveryIso)) {
                         throw new Error("Obie daty muszą być uzupełnione.");
                     }
+                    saveToken = beginOrderDetailsSave();
                     await prepareRecord(correctionRecord);
                     const loadingValue = formatLegacyDateValue(loadingIso, loadingTemplate);
                     const deliveryValue = formatLegacyDateValue(deliveryIso, deliveryTemplate);
@@ -4143,12 +4208,12 @@
                     savedDeliveryIso = deliveryIso;
                     updateOriginalText(loading, loadingIso);
                     updateOriginalText(delivery, deliveryIso);
-                    showOrderSaveMessage("Zapisano datę załadunku i rozładunku.", "success");
                     return true;
                 })().catch(error => {
                     showOrderSaveMessage(error?.message || "Nie udało się zapisać dat.", "error");
                     return false;
                 }).finally(() => {
+                    endOrderDetailsSave(saveToken);
                     setDisabled(false);
                     savePromise = null;
                 });
@@ -4216,12 +4281,15 @@
                     showOrderSaveMessage(message, "error");
                     return;
                 }
+                let pageSaveToken = "";
                 try {
                     if (kind === "distance") {
                         await orderDetailsPageState?.quickCorrectionPanel?._taSave?.();
                         return;
                     }
                     if (kind === "main") {
+                        proxy.disabled = true;
+                        pageSaveToken = beginOrderDetailsSave();
                         const saved = await orderDetailsPageState?.quickCorrectionPanel?._taSave?.();
                         if (saved === false) {
                             console.error("[CEMET SAVE ERROR]", {
@@ -4233,6 +4301,10 @@
                     logOrderSave(kind, nativeForm, nativeSubmit);
                     nativeSubmit.click();
                 } catch (error) {
+                    if (kind === "main") {
+                        proxy.disabled = false;
+                        endOrderDetailsSave(pageSaveToken);
+                    }
                     console.error("[CEMET SAVE ERROR]", {
                         kind,
                         form: nativeForm,
@@ -4392,6 +4464,7 @@
 
     function classifyCarrierRecordAction(control) {
         if (!control) return "";
+        if (control.closest?.('[data-ta-bridge-record-confirmation="true"]')) return "";
         const href = String(control.getAttribute?.("href") || control.href || "");
         const inlineAction = String(control.getAttribute?.("onclick") || "");
         const label = foldText([
@@ -4805,6 +4878,10 @@
             document.documentElement.dataset.taCarrierRecordModalDelegated = "true";
             document.addEventListener("click", event => {
                 if (!isModernMode() || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+                if (
+                    event.target instanceof Element
+                    && event.target.closest('[data-ta-bridge-record-confirmation="true"]')
+                ) return;
                 const path = typeof event.composedPath === "function" ? event.composedPath() : [];
                 const pathControl = path.find(node =>
                     node instanceof Element
@@ -5157,6 +5234,26 @@
             return Boolean(closeLink) && foldText(candidate.textContent) === "zamknij";
         });
         closeTables.forEach(candidate => setRole(candidate, "order-details-close"));
+        const closeLinks = closeTables.flatMap(candidate => Array.from(candidate.querySelectorAll("a")))
+            .filter(link => foldText(link.textContent) === "zamknij");
+        closeLinks.forEach(link => {
+            link.addEventListener("click", event => {
+                if (!orderDetailsPageState?.savePending) return;
+                event.preventDefault();
+                event.stopImmediatePropagation();
+            }, true);
+        });
+
+        document.addEventListener("submit", event => {
+            const submittedForm = event.target;
+            if (!(submittedForm instanceof HTMLFormElement)) return;
+            const actionPath = normalizePathname(new URL(
+                submittedForm.getAttribute("action") || location.href,
+                location.href
+            ).pathname);
+            if (!ORDER_DETAILS_PATH_PATTERN.test(actionPath)) return;
+            if (!orderDetailsPageState?.saveOperationTokens?.size) beginOrderDetailsSave();
+        }, true);
 
         orderDetailsPageState = {
             table,
@@ -5169,6 +5266,9 @@
             deliveryState,
             paymentField,
             deliveryField,
+            closeLinks,
+            savePending: false,
+            saveOperationTokens: new Set(),
             dynamicSearches,
             consolidatedLayout
         };
@@ -5299,7 +5399,7 @@
         getDirectTableRows(table).forEach((row, rowIndex) => {
             if (!/\bdata\b|data zaladunku/.test(getReportRowLabel(row))) return;
             const inputs = Array.from(row.querySelectorAll('input[type="text"]'))
-                .filter(input => !input.disabled && !input.readOnly);
+                .filter(input => !input.disabled);
             inputs.forEach((input, inputIndex) => {
                 const result = enhanceReportDateInput(input, `${rowIndex + 1}-${inputIndex + 1}`);
                 if (result) enhanced.push(result);
@@ -6990,7 +7090,6 @@
     function revealModernUi() {
         const reveal = () => {
             document.documentElement.classList.add(READY_CLASS);
-            window.__transAssistantReleaseIntranetBootShield?.();
             if (currentMode === MODE_MODERN) finishLoginTransitionOnAcceptedPage();
             publishPerformanceMetrics();
         };
@@ -8683,6 +8782,104 @@
                 align-items: center;
                 gap: 6px;
                 background: #fff !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-lookup="true"] [data-ta-order-search-role="control"] {
+                display: grid !important;
+                grid-template-columns: minmax(0, 1fr) auto;
+                align-items: start;
+                gap: 6px;
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-lookup-action="true"] {
+                grid-column: 2;
+                grid-row: 1;
+                width: auto !important;
+                min-width: 86px !important;
+                height: 30px !important;
+                margin: 0 !important;
+                padding: 0 14px !important;
+                white-space: nowrap;
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] {
+                position: static !important;
+                display: block;
+                grid-column: 1 / -1;
+                grid-row: 2;
+                box-sizing: border-box !important;
+                width: 100% !important;
+                min-width: 0 !important;
+                max-width: none !important;
+                margin: 0 !important;
+                padding: 4px !important;
+                float: none !important;
+                clear: both;
+                overflow-x: hidden !important;
+                overflow-y: auto !important;
+                max-height: 190px !important;
+                border: 1px solid #b8c8d5 !important;
+                border-radius: 7px !important;
+                background: #fff !important;
+                box-shadow: 0 8px 20px rgba(24, 63, 112, .12) !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"]:empty {
+                display: none !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] ul {
+                position: static !important;
+                display: flex !important;
+                box-sizing: border-box !important;
+                width: 100% !important;
+                max-height: 190px !important;
+                margin: 0 !important;
+                padding: 4px !important;
+                overflow-x: hidden !important;
+                overflow-y: auto !important;
+                flex-direction: column !important;
+                gap: 2px !important;
+                border: 0 !important;
+                border-radius: 0 !important;
+                background: transparent !important;
+                box-shadow: none !important;
+                list-style: none !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] li {
+                position: static !important;
+                display: block !important;
+                box-sizing: border-box !important;
+                width: 100% !important;
+                min-width: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                float: none !important;
+                border: 0 !important;
+                background: transparent !important;
+                list-style: none !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] li > a,
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] > a {
+                display: flex !important;
+                box-sizing: border-box !important;
+                width: 100% !important;
+                min-height: 36px !important;
+                padding: 6px 10px !important;
+                align-items: center;
+                border: 0 !important;
+                border-radius: 5px !important;
+                background: #fff !important;
+                color: #173f75 !important;
+                font-size: 10px !important;
+                font-weight: 800 !important;
+                line-height: 1.25 !important;
+                text-align: left !important;
+                text-decoration: none !important;
+                white-space: normal !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] li > a:hover,
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] li > a:focus-visible,
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] > a:hover,
+            html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-suggestions="true"] > a:focus-visible {
+                background: #edf5e8 !important;
+                color: #2f6526 !important;
+                outline: none !important;
             }
             html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-role="control"] input[type="text"],
             html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-role="control"] select {
@@ -12170,6 +12367,61 @@
                 border-color: #8eab75 !important;
                 background: #eef6e8 !important;
                 box-shadow: 0 3px 8px rgba(73, 111, 42, .1);
+            }
+            html.ta-intranet-modern.ta-intranet-page-order-details [data-ta-intranet-role="order-details-close"] a[aria-disabled="true"],
+            html.ta-intranet-modern.ta-intranet-page-order-details [data-ta-intranet-role="order-details-close"] a[aria-disabled="true"]:hover {
+                border-color: #cbd2d7 !important;
+                background: #eceff1 !important;
+                color: #8c969e !important;
+                box-shadow: none !important;
+                cursor: not-allowed !important;
+                filter: grayscale(1);
+                opacity: .65;
+                transform: none !important;
+            }
+            #${ORDER_SAVE_OVERLAY_ID} {
+                position: fixed;
+                z-index: 2147483646;
+                inset: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 24px;
+                background: rgba(238, 243, 239, .68);
+                backdrop-filter: blur(3px);
+                -webkit-backdrop-filter: blur(3px);
+            }
+            #${ORDER_SAVE_OVERLAY_ID}[hidden] {
+                display: none !important;
+            }
+            #${ORDER_SAVE_OVERLAY_ID} .ta-order-save-overlay-card {
+                display: flex;
+                min-width: 230px;
+                box-sizing: border-box;
+                align-items: center;
+                flex-direction: column;
+                padding: 25px 32px 23px;
+                border: 1px solid #d3dfd0;
+                border-top: 4px solid #72b333;
+                border-radius: 14px;
+                background: rgba(255, 255, 255, .96);
+                color: #173f75;
+                box-shadow: 0 18px 48px rgba(18, 55, 91, .18);
+                text-align: center;
+            }
+            #${ORDER_SAVE_OVERLAY_ID} .ta-order-save-spinner {
+                width: 42px;
+                height: 42px;
+                box-sizing: border-box;
+                margin-bottom: 15px;
+                border: 4px solid #dce9d2;
+                border-top-color: #72b333;
+                border-right-color: #17477e;
+                border-radius: 50%;
+                animation: taAcceptedBootSpin .8s linear infinite;
+            }
+            #${ORDER_SAVE_OVERLAY_ID} strong {
+                font: 800 15px/1.3 Arial, sans-serif;
             }
             @media (max-width: 1500px) {
                 html.ta-intranet-modern .ta-cemet-metric-grid {
