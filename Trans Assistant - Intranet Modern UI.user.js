@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trans Assistant - Intranet Modern UI
 // @namespace    trans-assistant
-// @version      1.08
+// @version      1.09
 // @description  Nowoczesna, odwracalna nakladka interfejsu na intranet CEMET.
 // @match        *://intranet/*
 // @updateURL    https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
@@ -47,7 +47,7 @@
     }
     window.transAssistantIntranetModernUiRunning = true;
 
-    const SCRIPT_VERSION = "1.08";
+    const SCRIPT_VERSION = "1.09";
     const performanceMetrics = {
         scriptStartedAt: performance.now(),
         earlyUiStartedAt: 0,
@@ -72,7 +72,7 @@
     const REMOTE_CONFIG_URL = "https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/config.json";
     const REMOTE_CONFIG_CACHE_KEY = "transAssistantIntranetModernUiRemoteConfigV1";
     const REMOTE_CONFIG_TIMEOUT_MS = 5000;
-    const REMOTE_CONFIG_CHECK_INTERVAL_MS = 10 * 1000;
+    const REMOTE_CONFIG_CHECK_INTERVAL_MS = 60 * 60 * 1000;
     const REMOTE_DISABLED_NOTICE_ID = "trans-assistant-intranet-remote-disabled";
     const STORAGE_KEY = "transAssistantIntranetUiModeV1";
     const DASHBOARD_COLLAPSED_KEY = "transAssistantIntranetDashboardCollapsedV1";
@@ -103,6 +103,7 @@
     const ORDER_CANCEL_POPUP_PATH_PATTERN = /\/zlecenie\/anuluj_zlec\.php$/i;
     const ORDER_ATTACHMENT_POPUP_PATH_PATTERN = /\/zlecenie\/dodaj_zalacznik\.php$/i;
     const OFFER_CANCELLATION_PATH = "/spedycja_uss_2022/oferta/anulowanie.php";
+    const OFFER_CANCELLATION_PATH_PATTERN = /\/oferta\/anulowanie\.php$/i;
     const ORDER_DETAILS_PATH_PATTERN = /\/zlecenie\/zlec_akcept_zm\.php$/i;
     const OFFER_FORM_PATH_PATTERN = /\/oferta\/dodanie\.php$/i;
     const OFFER_LOADING_PLACE_PATH_PATTERN = /\/oferta\/dod_nowe_miejsce\.php$/i;
@@ -336,6 +337,7 @@
     let acceptedSoftRefreshInFlight = null;
     let acceptedSoftRefreshHooksInstalled = false;
     let approvalSubmissionInFlight = false;
+    let offerCancellationInFlight = null;
 
     if (isSupportedBase() && remoteConfigAllowed) {
         // Tryb klasyczny nie uruchamia żadnych przechwyceń ani adapterów.
@@ -2128,6 +2130,145 @@
         ) || null;
     }
 
+    function findOfferCancellationResultTable(doc = document) {
+        return Array.from(doc?.querySelectorAll?.("table") || []).find(table => {
+            const header = Array.from(table.rows || []).find(row => row.cells?.length === 6);
+            if (!header) return false;
+            const labels = Array.from(header.cells, cell => foldText(cell.textContent));
+            return labels[0] === "id oferty"
+                && labels[1] === "status oferty"
+                && labels[2] === "oferent"
+                && labels[3] === "miasto odbiorcy"
+                && labels[4] === "wartosc"
+                && labels[5] === "czynnosc";
+        }) || null;
+    }
+
+    function readOfferCancellationResult(doc, offerNumber) {
+        const normalizedOfferNumber = String(offerNumber || "").trim();
+        const table = findOfferCancellationResultTable(doc);
+        if (!table || !/^\d+$/.test(normalizedOfferNumber)) return null;
+        const row = Array.from(table.rows || []).find(candidate =>
+            String(candidate.querySelector('input[name="id_oferty"]')?.value || "").trim() === normalizedOfferNumber
+        ) || null;
+        if (!row || row.cells?.length !== 6) return null;
+        return {
+            row,
+            status: foldText(row.cells[1]?.textContent),
+            statusText: cleanText(row.cells[1]?.textContent)
+        };
+    }
+
+    async function verifyOfferCancellation(offerNumber) {
+        const verification = await loadOfferCancellationConfirmation(offerNumber);
+        const result = readOfferCancellationResult(verification.lookup.doc, offerNumber);
+        if (!result) {
+            throw new Error("Intranet nie zwrócił wiersza oferty po anulowaniu.");
+        }
+        if (result.status !== "anulowana") {
+            throw new Error(`Intranet nie potwierdził statusu „Anulowana” (aktualny status: ${result.statusText || "brak"}).`);
+        }
+        return result;
+    }
+
+    function addOfferCancellationSubmitProxy(nativeSubmit, label, tone = "primary") {
+        if (!nativeSubmit || nativeSubmit.dataset.taOfferCancellationNativeSubmit === "true") return null;
+        nativeSubmit.dataset.taOfferCancellationNativeSubmit = "true";
+        markNativeSubmitCaption(nativeSubmit);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ta-offer-cancellation-submit";
+        button.dataset.tone = tone;
+        button.textContent = label;
+        button.addEventListener("click", () => nativeSubmit.click());
+        nativeSubmit.insertAdjacentElement("afterend", button);
+        return button;
+    }
+
+    function mountOfferCancellationPage() {
+        if (!mountIntranetShell()) return false;
+        const mainCell = document.querySelector('[data-ta-intranet-role="main-content"]');
+        if (!mainCell) return false;
+        const resultTable = findOfferCancellationResultTable(document);
+        const lookupForm = findOfferCancellationForm(document, "co");
+        const lookupTable = lookupForm?.querySelector("table") || null;
+        const backForm = Array.from(mainCell.querySelectorAll("form")).find(form =>
+            form.elements?.namedItem("co")
+            && !form.elements?.namedItem("id_oferty")
+            && /powrot/.test(foldText(form.querySelector('input[type="image"]')?.title))
+        ) || null;
+        if (!resultTable && !lookupForm && !backForm) return false;
+
+        const legacyHeading = Array.from(mainCell.querySelectorAll("table")).find(table =>
+            table !== resultTable
+            && table !== lookupTable
+            && foldText(table.textContent).includes("anulowanie ofert")
+            && String(table.textContent || "").trim().length < 180
+        ) || null;
+        setRole(legacyHeading, "offer-cancellation-legacy-heading");
+
+        const header = document.createElement("header");
+        header.className = "ta-offer-cancellation-header";
+        header.innerHTML = `
+            <div class="ta-order-details-mark" aria-hidden="true">C</div>
+            <div>
+                <span>OFERTA</span>
+                <h1>Anulowanie ofert</h1>
+                <p>${resultTable ? "Sprawdź ofertę przed wykonaniem anulowania" : "Wyszukaj ofertę po numerze lub kontrahencie"}</p>
+            </div>
+        `;
+        const target = resultTable || lookupForm || backForm;
+        mainCell.insertBefore(header, target?.parentNode === mainCell ? target : mainCell.firstChild);
+
+        if (lookupForm) {
+            lookupForm.dataset.taOfferCancellationLookup = "true";
+            if (lookupTable) lookupTable.dataset.taOfferCancellationCriteria = "true";
+            lookupForm.querySelector('select[name="k_id"]')?.setAttribute("data-ta-offer-cancellation-field", "contractor");
+            lookupForm.querySelector('input[name="id_oferty"]')?.setAttribute("data-ta-offer-cancellation-field", "offer-number");
+            addOfferCancellationSubmitProxy(
+                lookupForm.querySelector('input[type="image"]'),
+                "Wyszukaj ofertę"
+            );
+        }
+
+        if (resultTable) {
+            resultTable.dataset.taOfferCancellationResults = "true";
+            const columns = ["offer-number", "status", "offerer", "destination", "value", "action"];
+            Array.from(resultTable.rows || []).forEach((row, rowIndex) => {
+                if (row.cells?.length !== columns.length) return;
+                row.dataset.taOfferCancellationRow = rowIndex === 0 ? "header" : "offer";
+                Array.from(row.cells).forEach((cell, index) => {
+                    cell.dataset.taOfferCancellationColumn = columns[index];
+                });
+                if (rowIndex > 0) {
+                    const status = foldText(row.cells[1]?.textContent) || "unknown";
+                    row.dataset.taOfferCancellationStatus = status;
+                    const cancelButton = addOfferCancellationSubmitProxy(
+                        row.querySelector('input[type="image"]'),
+                        "Anuluj ofertę",
+                        "danger"
+                    );
+                    if (cancelButton && status === "anulowana") {
+                        cancelButton.disabled = true;
+                        cancelButton.dataset.tone = "secondary";
+                        cancelButton.textContent = "Anulowana";
+                    }
+                }
+            });
+        }
+
+        if (backForm) {
+            backForm.dataset.taOfferCancellationBack = "true";
+            addOfferCancellationSubmitProxy(
+                backForm.querySelector('input[type="image"]'),
+                "Powrót",
+                "secondary"
+            );
+        }
+        document.documentElement.classList.add("ta-intranet-page-offer-cancellation");
+        return true;
+    }
+
     function getOfferCancellationControl(form, name) {
         const control = form?.elements?.namedItem(name) || null;
         if (!control || typeof control.value === "undefined") return null;
@@ -2363,6 +2504,8 @@
                         resolveOfferCancellationAction(confirmForm, lookup.responseUrl),
                         { method: "POST", body: cancellationData }
                     );
+                    button.textContent = "Weryfikuję…";
+                    await verifyOfferCancellation(normalizedOfferNumber);
                     return decodeOfferCancellationMessage(result.responseUrl)
                         || `Oferta ${normalizedOfferNumber} została anulowana.`;
                 }
@@ -2398,15 +2541,32 @@
         button.textContent = "Anuluj";
         button.title = `Anuluj ofertę ${offerNumber}`;
         button.addEventListener("click", () => {
-            cancelOfferThroughNativeFlow(offerNumber, button).catch(async error => {
-                console.error(`[Trans Assistant Intranet Modern UI ${SCRIPT_VERSION}] Anulowanie oferty nie powiodło się.`, error);
-                await showAcceptanceDialog({
-                    title: "Nie udało się anulować oferty",
-                    message: `Oferta ${offerNumber}: ${error.message || error}`,
-                    tone: "danger",
-                    confirmLabel: "Zamknij"
-                });
+            if (offerCancellationInFlight) return;
+            const cancellationButtons = Array.from(document.querySelectorAll(".ta-acceptance-cancel-offer"));
+            cancellationButtons.forEach(candidate => {
+                candidate.disabled = true;
+                candidate.dataset.taCancellationLock = "true";
             });
+            const operation = cancelOfferThroughNativeFlow(offerNumber, button);
+            offerCancellationInFlight = operation;
+            operation
+                .catch(async error => {
+                    console.error(`[Trans Assistant Intranet Modern UI ${SCRIPT_VERSION}] Anulowanie oferty nie powiodło się.`, error);
+                    await showAcceptanceDialog({
+                        title: "Nie udało się anulować oferty",
+                        message: `Oferta ${offerNumber}: ${error.message || error}`,
+                        tone: "danger",
+                        confirmLabel: "Zamknij"
+                    });
+                })
+                .finally(() => {
+                    if (offerCancellationInFlight !== operation) return;
+                    offerCancellationInFlight = null;
+                    cancellationButtons.forEach(candidate => {
+                        candidate.disabled = false;
+                        delete candidate.dataset.taCancellationLock;
+                    });
+                });
         });
         actions.appendChild(button);
         return button;
@@ -6964,6 +7124,11 @@
             mount: mountOfferLoadingPlacePopup
         },
         {
+            id: "offer-cancellation",
+            matches: pathname => OFFER_CANCELLATION_PATH_PATTERN.test(pathname),
+            mount: mountOfferCancellationPage
+        },
+        {
             id: "offer-form",
             matches: pathname => OFFER_FORM_PATH_PATTERN.test(pathname),
             mount: () => mountBusinessFormPage("offer")
@@ -8962,6 +9127,180 @@
             html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-column="invoice-status"] { width: 68px; }
             html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-column="attachment"] { width: 58px; }
             html.ta-intranet-modern.ta-intranet-page-order-search [data-ta-order-search-column="user"] { width: 90px; }
+
+            .ta-offer-cancellation-header,
+            .ta-offer-cancellation-submit {
+                display: none;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-intranet-role="main-content"] {
+                padding: 16px 18px 34px 8px !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-intranet-role="offer-cancellation-legacy-heading"] {
+                display: none !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation .ta-offer-cancellation-header {
+                display: flex;
+                box-sizing: border-box;
+                width: min(1120px, 100%);
+                min-height: 80px;
+                margin: 0 auto 12px;
+                padding: 15px 17px;
+                align-items: center;
+                gap: 13px;
+                border: 1px solid #d6e0d5;
+                border-top: 4px solid #72b333;
+                border-radius: 13px;
+                background: #fff;
+                box-shadow: 0 9px 24px rgba(22, 57, 88, .08);
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation .ta-offer-cancellation-header span {
+                display: block;
+                margin-bottom: 3px;
+                color: #5e982d;
+                font: 900 9px/1 Arial, sans-serif;
+                letter-spacing: .12em;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation .ta-offer-cancellation-header h1 {
+                margin: 0;
+                color: #123f78;
+                font: 800 22px/1.08 Arial, sans-serif;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation .ta-offer-cancellation-header p {
+                margin: 5px 0 0;
+                color: #708095;
+                font: 600 10px/1.3 Arial, sans-serif;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-lookup="true"] {
+                box-sizing: border-box;
+                width: min(900px, 100%);
+                margin: 0 auto 12px;
+                padding: 13px;
+                border: 1px solid #d7e1e4;
+                border-radius: 11px;
+                background: #fff;
+                box-shadow: 0 7px 19px rgba(24, 58, 91, .06);
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-criteria="true"] {
+                width: 100% !important;
+                border-collapse: separate !important;
+                border-spacing: 0 7px !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-criteria="true"] td {
+                box-sizing: border-box;
+                padding: 7px 10px !important;
+                border-top: 1px solid #e0e7ea;
+                border-bottom: 1px solid #e0e7ea;
+                background: #f9fbfa !important;
+                color: #173f6d !important;
+                font: 700 11px/1.3 Arial, sans-serif !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-field] {
+                box-sizing: border-box !important;
+                width: 100% !important;
+                min-height: 34px;
+                padding: 6px 9px !important;
+                border: 1px solid #b9cad5 !important;
+                border-radius: 7px !important;
+                background: #fff !important;
+                color: #173f6d !important;
+                font: 650 11px/1.25 Arial, sans-serif !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-results="true"] {
+                width: min(1120px, 100%) !important;
+                margin: 0 auto !important;
+                border: 1px solid #d5dfe4 !important;
+                border-collapse: separate !important;
+                border-spacing: 0 !important;
+                border-radius: 11px;
+                background: #fff;
+                box-shadow: 0 8px 22px rgba(22, 57, 88, .07);
+                overflow: hidden;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-row="header"] td {
+                padding: 9px 10px !important;
+                border: 0 !important;
+                border-right: 1px solid rgba(255, 255, 255, .18) !important;
+                background: #17477e !important;
+                color: #fff !important;
+                font: 800 10px/1.25 Arial, sans-serif !important;
+                text-align: left !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-row="offer"] td {
+                padding: 10px !important;
+                border: 0 !important;
+                border-bottom: 1px solid #e2e8eb !important;
+                background: #fff !important;
+                color: #173f66 !important;
+                font: 650 11px/1.35 Arial, sans-serif !important;
+                vertical-align: middle !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-row="offer"]:nth-child(odd) td {
+                background: #f7fafb !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-status="anulowana"] [data-ta-offer-cancellation-column="status"] {
+                color: #9b3d30 !important;
+                font-weight: 850 !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-column="offer-number"] { width: 11%; }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-column="status"] { width: 15%; }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-column="offerer"] { width: 27%; }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-column="destination"] { width: 18%; }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-column="value"] { width: 12%; }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-column="action"] {
+                width: 17%;
+                text-align: center !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation input[data-ta-offer-cancellation-native-submit="true"],
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-native-submit-caption="true"] {
+                display: none !important;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation .ta-offer-cancellation-submit {
+                display: inline-flex;
+                min-height: 34px;
+                box-sizing: border-box;
+                padding: 0 16px;
+                align-items: center;
+                justify-content: center;
+                border: 1px solid #5d9829;
+                border-radius: 7px;
+                background: linear-gradient(135deg, #82bd3d, #659f2d);
+                color: #fff;
+                font: 800 11px/1 Arial, sans-serif;
+                box-shadow: 0 6px 14px rgba(94, 152, 41, .18);
+                cursor: pointer;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation .ta-offer-cancellation-submit[data-tone="danger"] {
+                border-color: #bb5948;
+                background: linear-gradient(135deg, #cf6a58, #ad4939);
+                box-shadow: 0 6px 14px rgba(173, 73, 57, .17);
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation .ta-offer-cancellation-submit[data-tone="secondary"] {
+                border-color: #b7c7d2;
+                background: #fff;
+                color: #234d78;
+                box-shadow: none;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation .ta-offer-cancellation-submit:disabled {
+                border-color: #c7d0d6;
+                background: #eef1f3;
+                color: #7b8790;
+                box-shadow: none;
+                cursor: not-allowed;
+            }
+            html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-back="true"] {
+                width: min(1120px, 100%);
+                margin: 12px auto 0;
+                text-align: center;
+            }
+            @media (max-width: 760px) {
+                html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-results="true"] {
+                    display: block;
+                    overflow-x: auto;
+                }
+                html.ta-intranet-modern.ta-intranet-page-offer-cancellation [data-ta-offer-cancellation-results="true"] tbody {
+                    min-width: 760px;
+                }
+            }
 
             html.ta-intranet-modern.ta-intranet-page-offer-form .ta-offer-summary-header,
             html.ta-intranet-modern.ta-intranet-page-offer-form [data-ta-intranet-role="offer-summary-table"],
@@ -11376,7 +11715,7 @@
                 white-space: nowrap !important;
             }
             html.ta-intranet-modern [data-ta-intranet-column="unloading-date"] { width: 6%; min-width: 0; }
-            html.ta-intranet-modern [data-ta-intranet-column="attachment"] { width: 4%; min-width: 0; }
+            html.ta-intranet-modern [data-ta-intranet-column="attachment"] { width: 78px; min-width: 78px; }
             html.ta-intranet-modern [data-ta-intranet-column="user"] { width: 7%; min-width: 0; }
             html.ta-intranet-modern [data-ta-intranet-column="external-number"] {
                 white-space: nowrap !important;
@@ -11480,7 +11819,16 @@
             html.ta-intranet-modern [data-ta-intranet-action="print-list"]::before { content: "LIST"; }
             html.ta-intranet-modern [data-ta-intranet-action="print-order"]::before { content: "ZLECENIE"; }
             html.ta-intranet-modern [data-ta-intranet-action="cancel-order"]::before { content: "ANULUJ"; }
-            html.ta-intranet-modern [data-ta-intranet-action="attachment"]::before { content: "—"; }
+            html.ta-intranet-modern [data-ta-intranet-action="attachment"]::before {
+                content: "";
+                display: block;
+                width: 18px;
+                height: 18px;
+                flex: 0 0 18px;
+                background: currentColor;
+                -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7V5.8A1.8 1.8 0 0 1 4.8 4h4.7l2.2 2H19a2 2 0 0 1 2 2v5'/%3E%3Cpath d='M3 7v10.2A1.8 1.8 0 0 0 4.8 19H12'/%3E%3Ccircle cx='18' cy='18' r='4'/%3E%3Cpath d='M18 16v4M16 18h4'/%3E%3C/svg%3E") center / contain no-repeat;
+                mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7V5.8A1.8 1.8 0 0 1 4.8 4h4.7l2.2 2H19a2 2 0 0 1 2 2v5'/%3E%3Cpath d='M3 7v10.2A1.8 1.8 0 0 0 4.8 19H12'/%3E%3Ccircle cx='18' cy='18' r='4'/%3E%3Cpath d='M18 16v4M16 18h4'/%3E%3C/svg%3E") center / contain no-repeat;
+            }
             html.ta-intranet-modern [data-ta-intranet-action="print-list"]::before,
             html.ta-intranet-modern [data-ta-intranet-action="print-order"]::before,
             html.ta-intranet-modern [data-ta-intranet-action="cancel-order"]::before,
@@ -11513,21 +11861,21 @@
                 background: #f5f7f8 !important;
                 color: #87939e !important;
             }
+            html.ta-intranet-modern [data-ta-intranet-action="attachment"][data-ta-attachment-state="empty"] {
+                border-color: #d98d82 !important;
+                background: #fff0ed !important;
+                color: #a94335 !important;
+                box-shadow: inset 0 0 0 1px rgba(169, 67, 53, .08);
+            }
             html.ta-intranet-modern [data-ta-intranet-action="attachment"][data-ta-attachment-state="present"] {
                 border-color: #adc58f !important;
                 background: #eef6e8 !important;
                 color: #426f25 !important;
             }
-            html.ta-intranet-modern [data-ta-intranet-action="attachment"][data-ta-attachment-state="present"]::before {
-                content: "📎";
-                font-family: "Segoe UI Emoji", Arial, sans-serif;
-                font-size: 16px;
-                line-height: 24px;
-            }
             html.ta-intranet-modern [data-ta-intranet-action="attachment"][data-ta-attachment-state="empty"]:hover {
-                border-color: #c3ccd2 !important;
-                background: #eef1f3 !important;
-                color: #687784 !important;
+                border-color: #c65f50 !important;
+                background: #ffe2dc !important;
+                color: #8f3024 !important;
             }
             html.ta-intranet-modern [data-ta-intranet-action="attachment"][data-ta-attachment-state="present"]:hover {
                 border-color: #87aa63 !important;
@@ -11535,47 +11883,49 @@
                 color: #315d18 !important;
             }
             html.ta-intranet-modern [data-ta-intranet-column="attachment"] {
-                padding: 1px 4px !important;
+                padding: 2px 4px !important;
             }
             html.ta-intranet-modern .ta-order-document-actions {
                 display: inline-flex;
-                width: 42px;
-                height: 37px;
-                align-items: stretch;
-                flex-direction: column;
+                width: 72px;
+                height: 34px;
+                align-items: center;
+                flex-direction: row;
                 justify-content: center;
-                gap: 1px;
+                gap: 4px;
                 vertical-align: middle;
             }
             html.ta-intranet-modern .ta-order-document-actions [data-ta-intranet-action="attachment"] {
-                width: 42px !important;
-                min-width: 42px !important;
-                height: 18px !important;
-                min-height: 18px !important;
+                width: 34px !important;
+                min-width: 34px !important;
+                height: 34px !important;
+                min-height: 34px !important;
                 margin: 0 !important;
                 padding: 0 !important;
-                flex: 0 0 18px;
+                flex: 0 0 34px;
+                border-radius: 7px !important;
             }
-            html.ta-intranet-modern .ta-order-document-actions [data-ta-intranet-action="attachment"][data-ta-attachment-state="present"]::before {
-                font-size: 13px;
-                line-height: 16px;
+            html.ta-intranet-modern .ta-order-document-actions [data-ta-intranet-action="attachment"]::before {
+                width: 21px;
+                height: 21px;
+                flex-basis: 21px;
             }
             html.ta-intranet-modern .ta-order-pdf-save {
                 display: inline-flex !important;
-                width: 42px !important;
-                min-width: 42px !important;
-                height: 18px !important;
-                min-height: 18px !important;
+                width: 34px !important;
+                min-width: 34px !important;
+                height: 34px !important;
+                min-height: 34px !important;
                 margin: 0 !important;
                 padding: 0 !important;
                 align-items: center;
-                flex: 0 0 18px;
+                flex: 0 0 34px;
                 justify-content: center;
                 border: 1px solid #aebed0 !important;
-                border-radius: 5px !important;
+                border-radius: 7px !important;
                 background: #f2f5f8 !important;
                 color: #173f75 !important;
-                font: 900 8px/16px Arial, sans-serif !important;
+                font: 900 9px/32px Arial, sans-serif !important;
                 letter-spacing: .03em;
                 box-shadow: none !important;
                 cursor: pointer;
