@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trans Assistant - Intranet Modern UI
 // @namespace    trans-assistant
-// @version      1.10
+// @version      1.11
 // @description  Nowoczesna, odwracalna nakladka interfejsu na intranet CEMET.
 // @match        *://intranet/*
 // @updateURL    https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
@@ -50,7 +50,7 @@
     }
     window.transAssistantIntranetModernUiRunning = true;
 
-    const SCRIPT_VERSION = "1.10";
+    const SCRIPT_VERSION = "1.11";
     const performanceMetrics = {
         scriptStartedAt: performance.now(),
         earlyUiStartedAt: 0,
@@ -942,6 +942,23 @@
 
     function markTopHeader(table) {
         setRole(table, "top-header");
+        const headerCells = Array.from(table?.rows?.[0]?.cells || []);
+        const brandCell = setRole(headerCells[0], "top-brand");
+        setRole(headerCells[1], "top-navigation");
+        const accountCell = setRole(headerCells[2], "top-account");
+        setRole(brandCell?.querySelector('img[src*="logo_cemet"]'), "top-logo");
+        setRole(accountCell?.querySelector("i"), "top-account-user");
+
+        if (accountCell && !accountCell.querySelector(".ta-top-account-context")) {
+            const contextNodes = Array.from(accountCell.childNodes || [])
+                .filter(node => node.nodeType === 3 && cleanText(node.textContent));
+            if (contextNodes.length) {
+                const context = document.createElement("span");
+                context.className = "ta-top-account-context";
+                contextNodes[0].before(context);
+                contextNodes.forEach(node => context.appendChild(node));
+            }
+        }
         table?.querySelectorAll("a[href]").forEach(link => {
             const label = cleanText(link.textContent);
             if (label) {
@@ -4199,6 +4216,9 @@
                     if (values.deliveryPlace !== undefined) {
                         panel._taOriginalDeliveryPlace = values.deliveryPlace;
                     }
+                    if (values.distance !== undefined) {
+                        panel._taOriginalDistance = values.distance;
+                    }
                     orderDetailsPageState?.embeddedCorrection?.updateOriginalValues?.(saved);
                     setStatus(messages.success || "Zapisano dane zlecenia.", "success");
                     return saved;
@@ -4245,6 +4265,7 @@
         const paymentCell = paymentRow?.querySelector('[data-ta-intranet-role="order-details-value"]');
         if (!deliveryCell || !paymentCell) return null;
         panel._taDistanceInput = distanceRow?.querySelector('[name="odleglosc"]') || null;
+        panel._taOriginalDistance = String(panel._taDistanceInput?.value || "").trim();
         const nativeDeliveryControl = deliveryCell.querySelector('input:not([type="hidden"]), select, textarea');
         const nativePaymentControl = paymentCell.querySelector('input:not([type="hidden"]), select, textarea');
         const nativeDeliveryValue = String(
@@ -4307,27 +4328,54 @@
         });
         paymentEditor.appendChild(paymentSave);
         paymentCell.append(paymentOriginal, paymentEditor);
-        panel._taSavePaymentIfDirty = async () => {
+        panel._taSaveDirtyCorrectionFields = async () => {
             const paymentTerm = String(controls.paymentInput.value || "").trim();
-            if (paymentTerm === panel._taOriginalPaymentTerm) return true;
-            if (!/^\d{1,3}$/.test(paymentTerm)) {
+            const deliveryPlace = String(controls.deliveryInput.value || "").trim();
+            const distance = String(panel._taDistanceInput?.value || "").trim();
+            const values = {};
+
+            if (paymentTerm !== panel._taOriginalPaymentTerm) {
+                values.paymentTerm = paymentTerm;
+            }
+            if (deliveryPlace !== panel._taOriginalDeliveryPlace) {
+                values.deliveryPlace = deliveryPlace;
+            }
+            if (panel._taDistanceInput && distance !== panel._taOriginalDistance) {
+                values.distance = distance;
+            }
+            if (!Object.keys(values).length) return true;
+
+            if (values.paymentTerm !== undefined && !/^\d{1,3}$/.test(paymentTerm)) {
                 showOrderSaveMessage("Termin płatności musi być liczbą od 0 do 999 dni.", "error");
                 controls.paymentInput.focus();
                 return false;
             }
+            if (values.deliveryPlace !== undefined && !deliveryPlace) {
+                showOrderSaveMessage("Miejsce dostawy nie może być puste.", "error");
+                controls.deliveryInput.focus();
+                return false;
+            }
+            if (values.distance !== undefined && !distance) {
+                showOrderSaveMessage("Odległość nie może być pusta.", "error");
+                panel._taDistanceInput.focus();
+                return false;
+            }
             const saved = await panel._taSaveFields(
-                { paymentTerm },
-                { saving: "Zapisywanie terminu płatności…", success: "Zapisano termin płatności." }
+                values,
+                { saving: "Zapisywanie zmienionych danych…", success: "Zapisano zmienione dane." }
             );
             if (!saved) return false;
-            const nativePayment = paymentOriginal.querySelector('[name="termin_platnosci_zlecenia"]')
-                || orderDetailsPageState?.paymentField;
-            if (nativePayment) {
-                nativePayment.value = paymentTerm;
-                dispatchControlValueEvents(nativePayment);
+            if (values.paymentTerm !== undefined) {
+                const nativePayment = paymentOriginal.querySelector('[name="termin_platnosci_zlecenia"]')
+                    || orderDetailsPageState?.paymentField;
+                if (nativePayment) {
+                    nativePayment.value = paymentTerm;
+                    dispatchControlValueEvents(nativePayment);
+                }
             }
             return true;
         };
+        panel._taSavePaymentIfDirty = panel._taSaveDirtyCorrectionFields;
 
         return {
             updateOriginalValues(saved) {
@@ -4495,6 +4543,52 @@
         return controller;
     }
 
+    function createLoadingPlaceSaveController(field) {
+        if (!field) return null;
+        let savedValue = String(field.value || "").trim();
+        let savePromise = null;
+        return {
+            isDirty() {
+                return String(field.value || "").trim() !== savedValue;
+            },
+            async save() {
+                if (savePromise) return savePromise;
+                savePromise = (async () => {
+                    const expectedValue = String(field.value || "").trim();
+                    const form = field.form;
+                    const submitter = findOwnedSubmitter(
+                        form,
+                        'input[type="image"], input[type="submit"], button[type="submit"]'
+                    );
+                    if (!form || !submitter || !expectedValue) {
+                        throw new Error("Nie znaleziono kompletnego formularza miejsca załadunku.");
+                    }
+                    const orderId = String(getFormControl(form, "id_o")?.value || "").trim();
+                    logOrderSave("loading-place-background", form, submitter);
+                    const responseDocument = await submitNativeFormInBackground(form, submitter);
+                    const responseForm = Array.from(responseDocument.forms || []).find(candidate => {
+                        const responseField = getFormControl(candidate, "miejsce_z_zmiana");
+                        if (!responseField) return false;
+                        const responseOrderId = String(getFormControl(candidate, "id_o")?.value || "").trim();
+                        return (!orderId || responseOrderId === orderId)
+                            && String(responseField.value || "").trim() === expectedValue;
+                    }) || null;
+                    if (!responseForm) {
+                        throw new Error("Intranet nie potwierdził zapisania miejsca załadunku.");
+                    }
+                    savedValue = expectedValue;
+                    return true;
+                })().catch(error => {
+                    showOrderSaveMessage(error?.message || "Nie udało się zapisać miejsca załadunku.", "error");
+                    return false;
+                }).finally(() => {
+                    savePromise = null;
+                });
+                return savePromise;
+            }
+        };
+    }
+
     function wrapLegacyActionCaptions(root) {
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
         const textNodes = [];
@@ -4569,13 +4663,32 @@
                 try {
                     if (kind === "main") {
                         proxy.disabled = true;
-                        const paymentSaved = await orderDetailsPageState?.quickCorrectionPanel
-                            ?._taSavePaymentIfDirty?.();
-                        if (paymentSaved === false) {
+                        pageSaveToken = beginOrderDetailsSave();
+                        const correctionSaved = await orderDetailsPageState?.quickCorrectionPanel
+                            ?._taSaveDirtyCorrectionFields?.();
+                        if (correctionSaved === false) {
                             proxy.disabled = false;
+                            endOrderDetailsSave(pageSaveToken);
                             return;
                         }
-                        pageSaveToken = beginOrderDetailsSave();
+                        const dateCorrection = orderDetailsPageState?.dateCorrection;
+                        if (dateCorrection?.isDirty?.()) {
+                            const datesSaved = await dateCorrection.save();
+                            if (datesSaved === false) {
+                                proxy.disabled = false;
+                                endOrderDetailsSave(pageSaveToken);
+                                return;
+                            }
+                        }
+                        const loadingPlaceSave = orderDetailsPageState?.loadingPlaceSave;
+                        if (loadingPlaceSave?.isDirty?.()) {
+                            const loadingPlaceSaved = await loadingPlaceSave.save();
+                            if (loadingPlaceSaved === false) {
+                                proxy.disabled = false;
+                                endOrderDetailsSave(pageSaveToken);
+                                return;
+                            }
+                        }
                     }
                     logOrderSave(kind, nativeForm, nativeSubmit);
                     nativeSubmit.click();
@@ -4670,7 +4783,7 @@
             visibleOptions = options.filter(option =>
                 !option.disabled && (!query || foldText(option.textContent).includes(query))
             );
-            const shownOptions = visibleOptions.slice(0, 12);
+            const shownOptions = visibleOptions;
             counter.textContent = visibleOptions.length ? String(visibleOptions.length) : "0";
             results.innerHTML = shownOptions.length
                 ? shownOptions.map(option => {
@@ -4699,7 +4812,7 @@
         });
         input.addEventListener("input", () => renderResults(input.value));
         input.addEventListener("keydown", event => {
-            const shownCount = Math.min(visibleOptions.length, 12);
+            const shownCount = visibleOptions.length;
             if (event.key === "ArrowDown" && shownCount) {
                 event.preventDefault();
                 activeIndex = (activeIndex + 1) % shownCount;
@@ -4818,13 +4931,13 @@
     function buildCarrierFleetRecordValues(fleet, contractorId) {
         const tractor = String(fleet?.tractor || "").trim();
         const trailer = String(fleet?.trailer || "").trim();
-        if (!tractor || !trailer) {
-            throw new Error("Podaj numery rejestracyjne ciągnika i naczepy.");
+        if (!tractor) {
+            throw new Error("Podaj numer rejestracyjny pojazdu.");
         }
         return {
             dod: "1",
             kontrahent: String(contractorId || ""),
-            numer_rejestracyjny: `${tractor}/${trailer}`,
+            numer_rejestracyjny: trailer ? `${tractor}/${trailer}` : tractor,
             rodzaj_nadwozia: "Firanka",
             ladownosc: "24",
             uwagi: ""
@@ -4949,6 +5062,7 @@
         if (!select || select.tagName !== "SELECT") return { ok: false, reason: "brak-listy-taboru" };
         const tractor = normalizeCarrierPlate(tractorPlate);
         const trailer = normalizeCarrierPlate(trailerPlate);
+        if (!tractor) return { ok: false, reason: "brak-numeru-pojazdu" };
         const candidates = Array.from(select.options || [])
             .filter(option => option.value)
             .map(option => {
@@ -4959,7 +5073,10 @@
                     extraLength: Math.max(0, normalized.length - tractor.length - trailer.length)
                 };
             })
-            .filter(candidate => candidate.normalized.includes(tractor) && candidate.normalized.includes(trailer))
+            .filter(candidate =>
+                candidate.normalized.includes(tractor)
+                && (!trailer || candidate.normalized.includes(trailer))
+            )
             .sort((left, right) => left.extraLength - right.extraLength);
         if (!candidates.length) return { ok: false, reason: "nie-znaleziono-zestawu" };
         if (candidates.length > 1 && candidates[0].extraLength === candidates[1].extraLength) {
@@ -4989,7 +5106,13 @@
             }
             const freshPage = await fetchHtmlDocument(location.href, { cache: "no-store" });
             const freshSelect = freshPage.document.querySelector(selector);
-            if (!freshSelect || freshSelect.options.length <= previousCount) continue;
+            if (!freshSelect) continue;
+            if (kind === "driver" && freshSelect.options.length <= previousCount) continue;
+
+            const freshSelection = kind === "driver"
+                ? selectCarrierDriverByName(freshSelect, record.driverName)
+                : selectCarrierVehicleByPlates(freshSelect, record.tractor, record.trailer);
+            if (!freshSelection?.ok) continue;
 
             resetEnhancedNativeSelect(currentSelect, kind === "driver" ? "driver" : "vehicle");
             currentSelect.replaceChildren(...Array.from(freshSelect.options).map(option => option.cloneNode(true)));
@@ -5037,9 +5160,9 @@
                     ` : `
                         <div class="ta-carrier-record-columns">
                             <label><span>Ciągnik</span><input name="record-tractor" autocomplete="off" required placeholder="np. WX1234A"></label>
-                            <label><span>Naczepa</span><input name="record-trailer" autocomplete="off" required placeholder="np. WX5678P"></label>
+                            <label><span>Naczepa (opcjonalnie)</span><input name="record-trailer" autocomplete="off" placeholder="np. WX5678P"></label>
                         </div>
-                        <p class="ta-carrier-record-helper">Zestaw zostanie zapisany jako Firanka, 24 t.</p>
+                        <p class="ta-carrier-record-helper">Dla solówki pozostaw pole naczepy puste. Tabor zostanie zapisany jako Firanka, 24 t.</p>
                     `}
                     <div class="ta-carrier-record-status" role="status" aria-live="polite"></div>
                     <footer>
@@ -5506,6 +5629,8 @@
         const quickCorrectionPanel = createQuickCorrectionPanel(orderId);
         const embeddedCorrection = embedCorrectionControls(quickCorrectionPanel, detailsRows);
         const dateCorrection = embedDateCorrectionControls(quickCorrectionPanel, detailsRows);
+        const loadingPlaceField = document.querySelector('[name="miejsce_z_zmiana"]');
+        const loadingPlaceSave = createLoadingPlaceSaveController(loadingPlaceField);
         const closeTables = Array.from(document.querySelectorAll("table")).filter(candidate => {
             if (candidate === table || candidate.contains(table) || table?.contains(candidate)) return false;
             const closeLink = Array.from(candidate.querySelectorAll("a"))
@@ -5541,6 +5666,7 @@
             quickCorrectionPanel,
             embeddedCorrection,
             dateCorrection,
+            loadingPlaceSave,
             paymentState,
             deliveryState,
             paymentField,
@@ -10992,6 +11118,91 @@
                 padding: 10px 12px !important;
                 background: transparent !important;
                 vertical-align: middle !important;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-brand"] {
+                width: 174px !important;
+                min-width: 174px !important;
+                box-sizing: border-box !important;
+                padding-left: clamp(20px, 2vw, 34px) !important;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-brand"] > a {
+                display: inline-flex !important;
+                box-sizing: border-box !important;
+                padding: 6px 9px !important;
+                align-items: center;
+                justify-content: center;
+                border: 1px solid #dfe8e1 !important;
+                border-radius: 11px !important;
+                background: #fff !important;
+                box-shadow: 0 6px 18px rgba(24, 58, 91, .1) !important;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-logo"] {
+                display: block !important;
+                width: 126px !important;
+                max-width: none !important;
+                height: auto !important;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-navigation"] {
+                width: auto !important;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-account"] {
+                width: 218px !important;
+                min-width: 218px !important;
+                box-sizing: border-box !important;
+                padding: 12px clamp(18px, 2vw, 30px) 12px 18px !important;
+                border-left: 1px solid #e1e8ec !important;
+                color: var(--ta-cemet-text) !important;
+                font: 700 11px/1.35 Arial, sans-serif !important;
+                text-align: left !important;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-account-user"] {
+                display: block !important;
+                margin: 0 !important;
+                color: var(--ta-cemet-navy-dark) !important;
+                font-size: 14px !important;
+                font-style: normal !important;
+                font-weight: 800 !important;
+                line-height: 1.2 !important;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-account-user"]::before {
+                content: "ZALOGOWANY";
+                display: block;
+                margin-bottom: 3px;
+                color: var(--ta-cemet-green-dark);
+                font-size: 8px;
+                font-weight: 900;
+                letter-spacing: .11em;
+                line-height: 1;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-account"] hr {
+                width: 100% !important;
+                height: 0 !important;
+                margin: 7px 0 6px !important;
+                border: 0 !important;
+                border-top: 1px solid #b9c9d8 !important;
+            }
+            html.ta-intranet-modern [data-ta-intranet-role="top-account"] .ta-top-account-context {
+                display: block;
+                color: #587087;
+                font-size: 9px;
+                font-weight: 700;
+                line-height: 1.35;
+                text-transform: uppercase;
+            }
+            @media (max-width: 1120px) {
+                html.ta-intranet-modern [data-ta-intranet-role="top-brand"] {
+                    width: 148px !important;
+                    min-width: 148px !important;
+                    padding-left: 16px !important;
+                }
+                html.ta-intranet-modern [data-ta-intranet-role="top-logo"] {
+                    width: 112px !important;
+                }
+                html.ta-intranet-modern [data-ta-intranet-role="top-account"] {
+                    width: 190px !important;
+                    min-width: 190px !important;
+                    padding-right: 16px !important;
+                }
             }
             html.ta-intranet-modern [data-ta-intranet-role="top-nav-link"],
             html.ta-intranet-modern [data-ta-intranet-role="top-nav-logout"] {
