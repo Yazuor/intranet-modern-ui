@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Trans Assistant - Intranet Modern UI
 // @namespace    trans-assistant
-// @version      1.11
+// @version      1.19
 // @description  Nowoczesna, odwracalna nakladka interfejsu na intranet CEMET.
 // @match        *://intranet/*
 // @updateURL    https://raw.githubusercontent.com/Yazuor/intranet-modern-ui/refs/heads/main/Trans%20Assistant%20-%20Intranet%20Modern%20UI.user.js
@@ -13,6 +13,49 @@
 (() => {
     "use strict";
 
+    function normalizeNativeOrderPrintStart() {
+        (function normalizeOrderPrintStart(printDocument) {
+    const body = printDocument.body;
+    if (!body) return;
+    const view = printDocument.defaultView;
+    for (const element of [body, ...body.querySelectorAll("*")]) {
+        if (element.closest("script, style, link, meta, [hidden]")) continue;
+        let hidden = false;
+        for (let parent = element; parent; parent = parent.parentElement) {
+            const style = view?.getComputedStyle(parent) || parent.style;
+            if (style?.display === "none" || style?.visibility === "hidden") {
+                hidden = true;
+                break;
+            }
+        }
+        if (hidden) continue;
+        element.style.setProperty("break-before", "auto", "important");
+        element.style.setProperty("page-break-before", "auto", "important");
+        element.style.setProperty("break-inside", "auto", "important");
+        element.style.setProperty("page-break-inside", "auto", "important");
+        const hasDirectText = Array.from(element.childNodes).some(node =>
+            node.nodeType === 3 && String(node.textContent || "").trim());
+        if (element.matches("img")) {
+            const width = element.naturalWidth || Number(element.getAttribute("width"));
+            const height = element.naturalHeight || Number(element.getAttribute("height"));
+            // The native invoice instructions are a full-page raster image.
+            // Fit it inside A4 instead of pushing an oversized inline image to page 2.
+            if (height >= 700 && width > 0 && height / width >= 1.1) {
+                element.style.setProperty("display", "block", "important");
+                element.style.setProperty("max-height", "267mm", "important");
+                element.style.setProperty("max-width", "100%", "important");
+                element.style.setProperty("width", "auto", "important");
+                element.style.setProperty("height", "auto", "important");
+                element.style.setProperty("object-fit", "contain", "important");
+            }
+        }
+        if (hasDirectText || element.matches("img, svg, canvas, iframe, object")) break;
+        element.style.setProperty("break-after", "auto", "important");
+        element.style.setProperty("page-break-after", "auto", "important");
+    }
+})(document);
+    }
+
     const printFallbackParams = new URLSearchParams(window.location.search);
     if (printFallbackParams.get("ta_modern_print") === "1") {
         const requestedTitle = String(printFallbackParams.get("ta_order") || "Zlecenie")
@@ -20,8 +63,16 @@
             .replace(/^-+|-+$/g, "") || "Zlecenie";
         const launchNativePrint = () => {
             document.title = requestedTitle;
+            if (!document.querySelector("[data-ta-print-page-size]")) {
+                const style = document.createElement("style");
+                style.dataset.taPrintPageSize = "1";
+                style.textContent = "@page {size:A4; margin:10mm}";
+                document.head.appendChild(style);
+            }
+            normalizeNativeOrderPrintStart();
             window.setTimeout(() => window.print(), 350);
         };
+        window.addEventListener("beforeprint", normalizeNativeOrderPrintStart);
         window.addEventListener("afterprint", () => {
             window.setTimeout(() => window.close(), 120);
         }, { once: true });
@@ -50,7 +101,7 @@
     }
     window.transAssistantIntranetModernUiRunning = true;
 
-    const SCRIPT_VERSION = "1.11";
+    const SCRIPT_VERSION = "1.19";
     const performanceMetrics = {
         scriptStartedAt: performance.now(),
         earlyUiStartedAt: 0,
@@ -84,6 +135,8 @@
     const LOGIN_TRANSITION_KEY = "transAssistantIntranetLoginTransitionV1";
     const LOGIN_TRANSITION_ID = "trans-assistant-login-transition";
     const LOGIN_TRANSITION_DURATION_MS = 4000;
+    const LOGIN_TRANSITION_CONTENT_FADE_MS = 160;
+    const LOGIN_TRANSITION_BACKGROUND_FADE_MS = 240;
     const LOGIN_FLOW_FRAME_NAME = "trans-assistant-intranet-login-flow";
     const LOGIN_FLOW_TIMEOUT_MS = 20000;
     const CARRIER_DRIVER_DOCUMENT_MAX_DOT_SUFFIX = 8;
@@ -108,7 +161,7 @@
     const OFFER_CANCELLATION_PATH = "/spedycja_uss_2022/oferta/anulowanie.php";
     const OFFER_CANCELLATION_PATH_PATTERN = /\/oferta\/anulowanie\.php$/i;
     const ORDER_DETAILS_PATH_PATTERN = /\/zlecenie\/zlec_akcept_zm\.php$/i;
-    const OFFER_FORM_PATH_PATTERN = /\/oferta\/dodanie\.php$/i;
+    const OFFER_FORM_PATH_PATTERN = /\/oferta\/dodanie(?:_wal)?\.php$/i;
     const OFFER_LOADING_PLACE_PATH_PATTERN = /\/oferta\/dod_nowe_miejsce\.php$/i;
     const CARRIER_ORDER_FORM_PATH_PATTERN = /\/zlecenie\/zlec_akcept2a\.php$/i;
     const CARRIER_FREIGHT_REPORT_PATH_PATTERN = /\/raporty\/raport_1\.php$/i;
@@ -187,6 +240,10 @@
                 visibility: hidden !important;
                 opacity: 0 !important;
             }
+            html.ta-login-transition-active.ta-login-transition-revealing body {
+                visibility: visible !important;
+                opacity: 1 !important;
+            }
             #${LOGIN_TRANSITION_ID} {
                 position: fixed;
                 z-index: 2147483647;
@@ -205,7 +262,13 @@
                 text-align: center;
                 visibility: visible !important;
                 opacity: 1 !important;
-                transition: opacity 180ms ease-out;
+                transition: opacity ${LOGIN_TRANSITION_BACKGROUND_FADE_MS}ms ease-out;
+            }
+            #${LOGIN_TRANSITION_ID} > * {
+                transition: opacity ${LOGIN_TRANSITION_CONTENT_FADE_MS}ms ease-out;
+            }
+            #${LOGIN_TRANSITION_ID}.ta-login-transition-finishing > * {
+                opacity: 0 !important;
             }
             #${LOGIN_TRANSITION_ID}.ta-login-transition-leaving {
                 pointer-events: none;
@@ -491,7 +554,11 @@
     function clearLoginTransition() {
         try { sessionStorage.removeItem(LOGIN_TRANSITION_KEY); } catch (_) {}
         document.getElementById(LOGIN_TRANSITION_ID)?.remove();
-        document.documentElement.classList.remove("ta-login-transition-active", "ta-intranet-login-boot");
+        document.documentElement.classList.remove(
+            "ta-login-transition-active",
+            "ta-login-transition-revealing",
+            "ta-intranet-login-boot"
+        );
     }
 
     function ensureLoginTransitionOverlay() {
@@ -558,8 +625,52 @@
     function finishLoginTransitionOnAcceptedPage() {
         const state = readLoginTransition();
         if (!state || !ACCEPTED_ORDERS_PATH_PATTERN.test(normalizePathname())) return false;
+        const overlay = ensureLoginTransitionOverlay();
+        if (overlay.dataset.taLoginFinishScheduled === "true") return true;
+        overlay.dataset.taLoginFinishScheduled = "true";
         const remaining = Math.max(0, LOGIN_TRANSITION_DURATION_MS - (Date.now() - state.startedAt));
-        window.setTimeout(clearLoginTransition, remaining);
+        window.setTimeout(() => {
+            if (!overlay.isConnected) {
+                clearLoginTransition();
+                return;
+            }
+
+            const root = document.documentElement;
+            let finished = false;
+            const complete = () => {
+                if (finished) return;
+                finished = true;
+                clearLoginTransition();
+            };
+            let backgroundFadeStarted = false;
+            const startBackgroundFade = () => {
+                if (backgroundFadeStarted || finished) return;
+                backgroundFadeStarted = true;
+                overlay.removeEventListener("transitionend", finishContentFade);
+                overlay.addEventListener("transitionend", event => {
+                    if (event.target === overlay && event.propertyName === "opacity") complete();
+                });
+
+                // Gotowy widok malujemy pod nadal jednolitym tłem. Dzięki temu
+                // pierścienie i napis nigdy nie nakładają się na tabelę zleceń.
+                root.classList.add("ta-login-transition-revealing");
+                const revealBackground = () => {
+                    overlay.classList.add("ta-login-transition-leaving");
+                    window.setTimeout(complete, LOGIN_TRANSITION_BACKGROUND_FADE_MS + 120);
+                };
+                if (typeof requestAnimationFrame === "function") {
+                    requestAnimationFrame(() => requestAnimationFrame(revealBackground));
+                } else {
+                    revealBackground();
+                }
+            };
+            const finishContentFade = event => {
+                if (event.target !== overlay && event.propertyName === "opacity") startBackgroundFade();
+            };
+            overlay.addEventListener("transitionend", finishContentFade);
+            overlay.classList.add("ta-login-transition-finishing");
+            window.setTimeout(startBackgroundFade, LOGIN_TRANSITION_CONTENT_FADE_MS + 100);
+        }, remaining);
         return true;
     }
 
@@ -2417,13 +2528,6 @@
         });
     }
 
-    function formatApprovedOrdersMessage(selectedCount) {
-        const count = Math.max(0, Number(selectedCount) || 0);
-        if (count === 1) return "Pomyślnie zatwierdzono 1 zlecenie.";
-        if (count > 1 && count < 5) return `Pomyślnie zatwierdzono ${count} zlecenia.`;
-        if (count >= 5) return `Pomyślnie zatwierdzono ${count} zleceń.`;
-        return "Wybrane zlecenia zostały zatwierdzone.";
-    }
 
     function consumePendingNativeDialog() {
         if (currentMode !== MODE_MODERN || !document.body) return false;
@@ -4737,6 +4841,10 @@
         });
     }
 
+    function normalizeNativeSelectQuery(value, kind) {
+        return kind === "vehicle" ? normalizeCarrierPlate(value) : foldText(value);
+    }
+
     function enhanceNativeSelectSearch(row, kind) {
         const select = row?.querySelector("select");
         const container = select?.parentElement;
@@ -4752,17 +4860,22 @@
         search.className = "ta-native-select-search";
         search.dataset.taSearchKind = kind;
         const listId = `ta-native-select-results-${kind}-${Math.random().toString(36).slice(2, 8)}`;
+        const placeholders = {
+            driver: "Szukaj i wybierz kierowcę…",
+            vehicle: "Szukaj i wybierz ciągnik lub naczepę…",
+            "loading-place": "Szukaj miejsca załadunku…"
+        };
         search.innerHTML = `
             <input type="search" autocomplete="off" role="combobox"
                 aria-autocomplete="list" aria-expanded="false" aria-controls="${listId}"
-                placeholder="${kind === "driver" ? "Szukaj i wybierz kierowcę…" : "Szukaj i wybierz ciągnik lub naczepę…"}">
+                placeholder="${placeholders[kind] || "Szukaj na liście…"}">
             <span class="ta-native-select-count"></span>
             <div class="ta-native-select-results" id="${listId}" role="listbox" hidden></div>
         `;
         const input = search.querySelector("input");
         const counter = search.querySelector(".ta-native-select-count");
         const results = search.querySelector(".ta-native-select-results");
-        const options = Array.from(select.options || []);
+        let options = Array.from(select.options || []);
         let visibleOptions = [];
         let activeIndex = -1;
         const selectedLabel = () => String(select.selectedOptions?.[0]?.textContent || "").trim();
@@ -4779,9 +4892,11 @@
             });
         };
         const renderResults = queryValue => {
-            const query = foldText(queryValue);
+            options = Array.from(select.options || []);
+            const normalizeSearch = value => normalizeNativeSelectQuery(value, kind);
+            const query = normalizeSearch(queryValue);
             visibleOptions = options.filter(option =>
-                !option.disabled && (!query || foldText(option.textContent).includes(query))
+                !option.disabled && (!query || normalizeSearch(option.textContent).includes(query))
             );
             const shownOptions = visibleOptions;
             counter.textContent = visibleOptions.length ? String(visibleOptions.length) : "0";
@@ -5079,7 +5194,9 @@
             )
             .sort((left, right) => left.extraLength - right.extraLength);
         if (!candidates.length) return { ok: false, reason: "nie-znaleziono-zestawu" };
-        if (candidates.length > 1 && candidates[0].extraLength === candidates[1].extraLength) {
+        if (candidates.length > 1 && candidates[0].extraLength === candidates[1].extraLength
+            && candidates.filter(candidate => candidate.extraLength === candidates[0].extraLength)
+                .some(candidate => candidate.normalized !== candidates[0].normalized)) {
             return { ok: false, reason: "niejednoznaczny-zestaw" };
         }
         select.value = candidates[0].option.value;
@@ -5095,6 +5212,36 @@
         delete select.dataset.taNativeSelectSearch;
     }
 
+    async function fetchCarrierSelectedOrderPage(contractorId) {
+        const form = Array.from(document.forms || []).find(candidate =>
+            candidate.elements.namedItem("id_o")
+            && candidate.elements.namedItem("dod")
+            && candidate.elements.namedItem("w_a1")
+            && candidate.elements.namedItem("k_id")
+            && Array.from(candidate.querySelectorAll('input[type="submit"]')).some(button =>
+                foldText(button.value) === "wybierz"
+            )
+        );
+        const orderId = String(form?.elements.namedItem("id_o")?.value || "").trim();
+        const orderIdFromUrl = new URL(location.href).searchParams.get("id_o");
+        const freight = String(form?.elements.namedItem("w_a1")?.value || "").trim();
+        const selectedContractor = String(form?.elements.namedItem("k_id")?.value || "").trim();
+        if (
+            !form || !/^\d+$/.test(orderId) || !/^\d+$/.test(selectedContractor)
+            || selectedContractor !== String(contractorId)
+            || (orderIdFromUrl && orderIdFromUrl !== orderId)
+        ) {
+            throw new Error("Nie znaleziono aktualnego formularza wyboru przewoźnika. Nie ponawiaj dodawania taboru; sprawdź go na liście.");
+        }
+        const body = new FormData();
+        body.append("id_o", orderId);
+        body.append("dod", "");
+        body.append("w_a1", freight);
+        body.append("k_id", selectedContractor);
+        const action = new URL(form.getAttribute("action") || location.href, location.href).href;
+        return fetchHtmlDocument(action, { method: "POST", body, cache: "no-store" });
+    }
+
     async function refreshCarrierRecordSelect(table, kind, record) {
         const selector = kind === "driver" ? '[name="kierowca"]' : '[name="i_sam"]';
         const currentSelect = table?.querySelector(selector);
@@ -5104,7 +5251,9 @@
             if (attempt > 0) {
                 await new Promise(resolve => window.setTimeout(resolve, attempt * 300));
             }
-            const freshPage = await fetchHtmlDocument(location.href, { cache: "no-store" });
+            const freshPage = kind === "fleet"
+                ? await fetchCarrierSelectedOrderPage(getCarrierContractorId())
+                : await fetchHtmlDocument(location.href, { cache: "no-store" });
             const freshSelect = freshPage.document.querySelector(selector);
             if (!freshSelect) continue;
             if (kind === "driver" && freshSelect.options.length <= previousCount) continue;
@@ -5125,7 +5274,7 @@
         throw new Error(
             kind === "driver"
                 ? "Intranet nie potwierdził dodania kierowcy na liście. Sprawdź dane i spróbuj ponownie."
-                : "Intranet nie potwierdził dodania taboru na liście. Sprawdź dane i spróbuj ponownie."
+                : "Nie udało się potwierdzić taboru na liście. Nie dodawaj go ponownie przed sprawdzeniem listy."
         );
     }
 
@@ -6904,6 +7053,7 @@
         });
         if (datesRow && routeDates.length >= 2) datesRow.dataset.taCarrierDatesMerged = "true";
 
+        requireCarrierFreight(table);
         installCarrierRecordModalLinks(table);
         const vehicleRow = table.querySelector('[name="i_sam"]')?.closest("tr");
         const driverRow = table.querySelector('[name="kierowca"]')?.closest("tr");
@@ -6916,6 +7066,43 @@
         } finally {
             table._taCarrierLayoutRefreshing = false;
         }
+    }
+
+    function requireCarrierFreight(table) {
+        const field = table.querySelector('[name="wartosc_zlecenie_przewoznik"]');
+        if (!field) return;
+        field.required = true;
+        field.setAttribute("aria-required", "true");
+        if (field.dataset.taRequiredFreight === "true") return;
+        field.dataset.taRequiredFreight = "true";
+        const updateValidity = () => {
+            field.setCustomValidity(String(field.value || "").trim() ? "" : "Wpisz fracht dla przewoźnika.");
+        };
+        field.addEventListener("input", updateValidity);
+        field.addEventListener("change", updateValidity);
+    }
+
+    function installCarrierFreightGuard() {
+        // Window capture runs before the Bridge's document capture handler,
+        // which can POST directly without native constraint validation.
+        const guard = event => {
+            if (!isModernMode()) return;
+            const field = document.querySelector('[name="wartosc_zlecenie_przewoznik"]');
+            if (!field) return;
+            if (event.type === "click") {
+                if (!event.target?.closest?.("#button1")) return;
+            } else if (event.target !== field.form) {
+                return;
+            }
+            const empty = !String(field.value || "").trim();
+            field.setCustomValidity(empty ? "Wpisz fracht dla przewoźnika." : "");
+            if (!empty) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            field.reportValidity();
+        };
+        window.addEventListener("click", guard, true);
+        window.addEventListener("submit", guard, true);
     }
 
     function mountCarrierOrderLayout(table) {
@@ -7301,6 +7488,8 @@
             enhanceOfferContinueAction(mainCell);
             markOfferRequiredRows(mainCell);
             installOfferLoadingPlaceModal(mainCell);
+            const loadingPlaceSelect = mainCell.querySelector('select[name="m_z"]');
+            enhanceNativeSelectSearch(loadingPlaceSelect?.closest("tr"), "loading-place");
             const rows = Array.from(mainCell.querySelectorAll("tr"));
             rows.filter(row => /data zaladunku/.test(foldText(row.cells?.[0]?.textContent)))
                 .forEach(row => enhanceOfferDateRow(row, "loading"));
@@ -13306,6 +13495,10 @@
         getAcceptedOrdersContract: collectAcceptedOrdersContract,
         softRefreshAcceptedOrders,
         findOrderDetailsTable,
+        saveOrderPaymentTerm: (orderNumber, paymentTerm) => saveCorrectionFields(
+            String(orderNumber || "").trim(),
+            { paymentTerm: String(paymentTerm || "").trim() }
+        ),
         applyMode,
         requestViewMode,
         getMode: () => currentMode,
@@ -13319,6 +13512,7 @@
     if (currentMode === MODE_MODERN) {
         installApprovalInlineDialogInterceptor();
         if (CARRIER_ORDER_FORM_PATH_PATTERN.test(normalizePathname())) {
+            installCarrierFreightGuard();
             installCarrierRecordModalDelegation();
         }
     }
